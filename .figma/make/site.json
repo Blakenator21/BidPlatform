@@ -1,0 +1,10 @@
+{
+  "description": "Upload and manage documents easily with a user-friendly interface designed for efficient file organization and quick access anytime.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
