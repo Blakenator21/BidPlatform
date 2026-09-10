@@ -1,12 +1,13 @@
-import { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   PEOPLE, PROJECTS, mkTasks, INITIAL_REVISIONS, INITIAL_DEALS,
-  STAGES, BD_ROSTER, NOTE_TAGS, WEEKDAY_LABELS,
+  NOTE_TAGS, WEEKDAY_LABELS,
   INITIAL_BID_PROJECTS, BID_LEVELS, DECLINE_REASONS,
   money, num, gpPct, gpNum, statusColor, statusShort, personName, personFirst, personInitials,
   taskDate, seedShiftDate, ymd, prettyShort, mondayOf, addDays,
-  type Task, type TaskStatus, type CrmStage, type Deal, type Revision,
-  type FollowUp, type NoteEntry, type Person, type Project, type BidProject, type BidStatus,
+  emptyGc,
+  type Task, type TaskStatus, type Deal, type Revision,
+  type FollowUp, type NoteEntry, type Person, type Project, type BidProject, type BidStatus, type GcEntry,
 } from './data';
 import { Button, Seg, Chip, StatusLight, KpiStrip, ListRow, Field, PageHeader, Rule, T, STATUS, inputStyle, type StatusKey } from './design/ui';
 
@@ -45,9 +46,8 @@ function dueColor(t: Task): string {
 const inp = inputStyle;
 
 // ─── types ────────────────────────────────────────────────────────────────────
-type View = 'myday' | 'overview' | 'calendar' | 'capacity' | 'projects';
-type AppTab = 'board' | 'tracker' | 'crm';
-type CrmView = 'home' | 'followups' | 'list' | 'record';
+type View = 'myday' | 'overview' | 'calendar' | 'capacity' | 'projects' | 'teamconnection' | 'resources';
+type AppTab = 'board' | 'tracker';
 type IssueRecord = { id: string; taskId: string; from: string; text: string; when: string; status: 'open' | 'resolved'; replies: NoteEntry[]; };
 type ProjNote = NoteEntry & { tag: string; label: string; };
 
@@ -64,10 +64,6 @@ interface AppState {
   showQuickNote: boolean; quickNote: { projectId: string; text: string; tag: string; };
   showNewTask: boolean; newTaskDraft: { title: string; projectId: string; who: string; day: string; hrs: string; note: string; };
   confirmClose: string | null;
-  crmView: CrmView; dealId: string; crmPane: 'info' | 'pricing' | 'followup';
-  crmStage: string; crmBd: string; crmSearch: string;
-  followDate: string; followNote: string; followWho: string;
-  revDraft: { label: string; price: string; cost: string; note: string; };
   projNoteDraft: string; projNoteTag: string;
   overviewMode: 'signals' | 'swimlanes' | 'teamcal';
   calOff: number; capOff: number;
@@ -77,7 +73,28 @@ interface AppState {
   newTaskSelfOnly: boolean;
   helpRequests: Array<{ id: string; from: string; fromName: string; projectId: string; when: string; read: boolean; }>;
   projStatusOverride: Record<string, 'todo' | 'awaiting' | 'comeback' | 'good'>;
+  focusProjOrder: string[];
   bidProjects: BidProject[];
+  tcSelected: string;
+  tcMessages: Record<string, Array<{ from: string; text: string; at: number; attachments?: Array<{ name: string; size: string; isImage: boolean; url?: string }>; }>>;
+  tcReadAt: Record<string, number>;
+  tcCompose: string;
+  tcGifPanel: boolean;
+  tcPendingFiles: Array<{ name: string; size: string; isImage: boolean; url?: string }>;
+  resCategory: 'processes' | 'vendors' | 'tools' | 'training';
+  resSearch: string;
+  resVendorTrade: string;
+  resSelectedVendor: string | null;
+  resProcessReader: string | null;
+  resTrainingFilter: string;
+  resAddingResource: boolean;
+  resVideoOpen: string | null;
+  customTrainingTypes: string[];
+  userTrainingVideos: Array<{ id: string; type: string; title: string; length: string; description: string; videoUrl: string; videoObjectUrl?: string; }>;
+  userProcesses: Array<{ id: string; kind: 'PDF' | 'DOCX' | 'OTHER'; title: string; owner: string; summary: string; fileUrl?: string; fileName?: string; sections: Array<{ heading: string; body: string }> }>;
+  userVendors: Array<{ id: string; name: string; trade: string; about: string; leadTime: string; quoteTurnaround: string; terms: string; contacts: Array<{ name: string; role: string; phone: string; email: string }> }>;
+  customVendorTrades: string[];
+  userTools: Array<{ id: string; name: string; kind: string; note: string; fileUrl?: string; fileName?: string; meta: string; training: string[] }>;
 }
 
 function initState(userId: string): AppState {
@@ -102,10 +119,6 @@ function initState(userId: string): AppState {
     showQuickNote: false, quickNote: { projectId: firstProj, text: '', tag: 'spec' },
     showNewTask: false, newTaskDraft: { title: '', projectId: firstProj, who: userId, day: 'Mon', hrs: '2', note: '' },
     confirmClose: null,
-    crmView: 'home', dealId: 'cedar', crmPane: 'info',
-    crmStage: 'All', crmBd: 'All', crmSearch: '',
-    followDate: '', followNote: '', followWho: 'All',
-    revDraft: { label: '', price: '', cost: '', note: '' },
     projNoteDraft: '', projNoteTag: 'spec',
     overviewMode: 'signals',
     calOff: 0, capOff: 0,
@@ -115,7 +128,41 @@ function initState(userId: string): AppState {
     newTaskSelfOnly: false,
     helpRequests: [],
     projStatusOverride: {},
+    focusProjOrder: [],
     bidProjects: INITIAL_BID_PROJECTS.map(b => ({ ...b })),
+    tcSelected: 'ch:all',
+    tcMessages: {
+      'ch:all': [
+        { from: 'blake', text: 'Cedar Point addendum 3 just dropped — everyone check drawings.', at: Date.now() - 3600000 * 2 },
+        { from: 'ray', text: 'Thanks Blake. Let us know if scope changes.', at: Date.now() - 3600000 },
+      ],
+      'ch:mgrs': [
+        { from: 'ray', text: 'Quick call at 2pm to review the bid pipeline?', at: Date.now() - 7200000 },
+        { from: 'blake', text: 'Works for me.', at: Date.now() - 7100000 },
+      ],
+      'blake~eric': [
+        { from: 'blake', text: 'Eric, can you get the glazing quote from Oldcastle by Wednesday?', at: Date.now() - 86400000 },
+        { from: 'eric', text: 'On it — will send as soon as I hear back.', at: Date.now() - 80000000 },
+      ],
+    },
+    tcReadAt: { 'ch:all': Date.now() - 500000 },
+    tcCompose: '',
+    tcGifPanel: false,
+    tcPendingFiles: [],
+    resCategory: 'processes',
+    resSearch: '',
+    resVendorTrade: 'All trades',
+    resSelectedVendor: null,
+    resProcessReader: null,
+    resTrainingFilter: 'All training',
+    resAddingResource: false,
+    resVideoOpen: null,
+    customTrainingTypes: [],
+    userTrainingVideos: [],
+    userProcesses: [],
+    userVendors: [],
+    userTools: [],
+    customVendorTrades: [],
   };
 }
 
@@ -124,15 +171,18 @@ const BID_STATUS_COLOR: Record<BidStatus, string> = {
   pending: 'var(--color-text)',
   accepted: '#1f7a4d',
   declined: 'var(--color-accent)',
+  review: 'oklch(0.50 0.18 240)',
 };
 const BID_STATUS_LABEL: Record<BidStatus, string> = {
-  pending: 'AWAITING', accepted: 'ACCEPTED', declined: 'DECLINED',
+  pending: 'AWAITING', accepted: 'ACCEPTED', declined: 'DECLINED', review: 'IN REVIEW',
 };
+const REVIEW_REASONS = ['Still deciding', 'Deeper dive needed', 'Too full this week', 'Waiting on more info', 'Other'];
 
 const emptyDraft = (): Partial<BidProject> => ({
-  name: '', gc: '', bidDate: '', level: '100% CD', location: '',
+  name: '', gc: '', gcs: [emptyGc()], bidDate: '', level: '100% CD', location: '',
   scope: '', planRoom: '', info: '', notes: '',
-  status: 'pending', assignees: [], declineReason: '', declineNote: '', notified: false,
+  status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false,
+  archived: false,
 });
 
 function BidBoardView({ st, setSt, me, flash, onSignOut }: {
@@ -140,11 +190,14 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
   me: Person; flash: (m: string) => void; onSignOut: () => void;
 }) {
   const [boardView, setBoardView] = useState<'grid' | 'byEstimator'>('grid');
-  const [filter, setFilter] = useState<'all' | 'pending' | 'accepted' | 'declined'>('all');
+  const [filter, setFilter] = useState<'all' | 'pending' | 'review' | 'accepted' | 'declined' | 'archived'>('all');
   const [search, setSearch] = useState('');
   const [showUpload, setShowUpload] = useState(false);
   const [assignFor, setAssignFor] = useState<string | null>(null);
   const [declineFor, setDeclineFor] = useState<string | null>(null);
+  const [reviewFor, setReviewFor] = useState<string | null>(null);
+  const [reviewReason, setReviewReason] = useState(REVIEW_REASONS[0]);
+  const [reviewNote, setReviewNote] = useState('');
   const [editBid, setEditBid] = useState<BidProject | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [assignees, setAssignees] = useState<string[]>([]);
@@ -156,12 +209,32 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
   const [detailBid, setDetailBid] = useState<BidProject | null>(null);
 
   const bids = st.bidProjects ?? INITIAL_BID_PROJECTS.map(b => ({ ...b }));
-  const pending = bids.filter(b => b.status === 'pending').length;
-  const accepted = bids.filter(b => b.status === 'accepted').length;
-  const declined = bids.filter(b => b.status === 'declined').length;
+
+  // Friday auto-archive: on mount, archive any bid that has passed its bid date and is not already archived
+  React.useEffect(() => {
+    const now = new Date();
+    const isFriday = now.getDay() === 5;
+    if (!isFriday) return;
+    const todayStr = now.toLocaleDateString('en-US', { month: 'short', day: '2-digit' }).replace(/^(\w+) 0?(\d+)$/, '$1 $2');
+    const toArchive = bids.filter(b => !b.archived && (b.status === 'accepted' || b.status === 'declined') && b.bidDate && b.bidDate < todayStr);
+    if (!toArchive.length) return;
+    setSt(s => ({ ...s, bidProjects: s.bidProjects.map(b =>
+      toArchive.some(a => a.id === b.id) ? { ...b, archived: true, archivedAt: todayStr } : b
+    )}));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const pending = bids.filter(b => !b.archived && b.status === 'pending').length;
+  const inReview = bids.filter(b => !b.archived && b.status === 'review').length;
+  const accepted = bids.filter(b => !b.archived && b.status === 'accepted').length;
+  const declined = bids.filter(b => !b.archived && b.status === 'declined').length;
+  const archived = bids.filter(b => b.archived).length;
 
   const filtered = bids.filter(b => {
+    if (filter === 'archived') return !!b.archived;
+    if (b.archived) return false;
     if (filter === 'pending' && b.status !== 'pending') return false;
+    if (filter === 'review' && b.status !== 'review') return false;
     if (filter === 'accepted' && b.status !== 'accepted') return false;
     if (filter === 'declined' && b.status !== 'declined') return false;
     if (search) {
@@ -207,19 +280,18 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
       const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][wd.getDay()];
       return { id: 'bt' + Date.now() + Math.random().toString(36).slice(2), title, projectId: projId, who: primary, status: 'To-Do', due: prettyShort(wd), day: dayName, date: ymd(wd), hrs, detail: '', notes: [] };
     }
-    const introDate = (() => { const d = addDays(bidDueDate, -14); return d > addDays(t0, 1) ? d : addDays(t0, 1); })();
     const newTasks: Task[] = [
-      mkTask('Intro email to GC', introDate, 1),
+      mkTask('Send intro email to GC', addDays(t0, 1), 1),
       mkTask('Takeoff + RFQs out', addDays(t0, 2), 6),
-      mkTask('Estimate sheet', addDays(bidDueDate, -1), 4),
-      mkTask('Finalize and submit', bidDueDate, 2),
+      mkTask('Manager review', addDays(bidDueDate, -1), 2),
+      mkTask('Estimate & proposal finalization', bidDueDate, 3),
     ];
 
     // create Deal
     const today = new Date().toLocaleDateString([], { month: 'short', day: '2-digit' });
     const newDeal: Deal = { estimator: primary, manager: '', bd: '', stage: 'Bidding', docStage: bid.level, price: '', cost: '', loggedAt: today, assignedAt: today };
 
-    patchBid(bid.id, { status: 'accepted', assignees, notified: notify });
+    patchBid(bid.id, { status: 'accepted', assignees, notified: notify, assignedDate: today });
     setSt(s => ({ ...s, tasks: [...s.tasks, ...newTasks], deals: { ...s.deals, [projId]: newDeal } }));
     setAssignFor(null);
     flash('Accepted — project added to Task Tracker + CRM');
@@ -234,10 +306,12 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
 
   function saveDraft() {
     if (!draft.name?.trim()) { flash('Enter a project name'); return; }
+    const gcs = (draft.gcs && draft.gcs.length > 0) ? draft.gcs : [emptyGc()];
+    const gc = gcs[0]?.company || draft.gc || '';
     if (editBid) {
-      patchBid(editBid.id, draft);
+      patchBid(editBid.id, { ...draft, gcs, gc });
     } else {
-      const nb: BidProject = { ...emptyDraft(), ...draft, id: 'bp' + Date.now(), status: 'pending', assignees: [], declineReason: '', declineNote: '', notified: false } as BidProject;
+      const nb: BidProject = { ...emptyDraft(), ...draft, gcs, gc, id: 'bp' + Date.now(), status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false, archived: false, entryDate: new Date().toLocaleDateString([], { month: 'short', day: '2-digit', year: 'numeric' }) } as BidProject;
       setSt(s => ({ ...s, bidProjects: [nb, ...s.bidProjects] }));
     }
     setShowUpload(false); setEditBid(null); setDraft(emptyDraft()); setItbText('');
@@ -245,19 +319,113 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
   }
 
   function parseItb() {
-    // simple heuristic extraction from pasted ITB email text
-    const lines = itbText.split('\n');
-    const find = (re: RegExp) => { for (const l of lines) { const m = re.exec(l); if (m) return m[1].trim(); } return ''; };
-    setDraft(d => ({
-      ...d,
-      name: find(/project[:\s]+(.+)/i) || d.name,
-      gc: find(/(?:from|company|gc|contractor)[:\s]+(.+)/i) || d.gc,
-      bidDate: find(/bid\s*due[:\s]+(.+)/i) || d.bidDate,
-      location: find(/(?:location|address|city)[:\s]+(.+)/i) || d.location,
-      scope: find(/scope[:\s]+(.+)/i) || d.scope,
-      info: itbText.slice(0, 600),
-    }));
-    flash('Fields extracted — review and adjust');
+    if (!itbText.trim()) { flash('Paste an ITB document first'); return; }
+    const text = itbText;
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+    const find = (...patterns: RegExp[]): string => {
+      for (const re of patterns) {
+        for (const l of lines) {
+          const m = re.exec(l);
+          if (m?.[1]) return m[1].trim().replace(/[<>]/g, '');
+        }
+      }
+      return '';
+    };
+
+    // Project name — look for subject line or "Project:" label
+    const projName = find(
+      /subject[:\s]+(?:invitation to bid[:\s-]*|itb[:\s-]*)(.+)/i,
+      /re[:\s]+(?:invitation to bid[:\s-]*|itb[:\s-]*)(.+)/i,
+      /project(?:\s+name)?[:\s]+(.+)/i,
+      /job(?:\s+name)?[:\s]+(.+)/i,
+    );
+
+    // GC company — from header, "from" line, or company label
+    const gcCompany = find(
+      /^from[:\s]+(.+?)(?:\s*<|$)/i,
+      /(?:general contractor|gc|sent by|company)[:\s]+(.+)/i,
+    );
+
+    // Bid date — support many formats: "Sep 20", "09/20/2025", "September 20, 2025"
+    const bidDateRaw = find(
+      /bid\s*(?:due|date|deadline)[:\s]+([A-Za-z]+\.?\s+\d{1,2}(?:,?\s+\d{4})?)/i,
+      /(?:due\s*date|submission\s*date)[:\s]+([A-Za-z]+\.?\s+\d{1,2}(?:,?\s+\d{4})?)/i,
+      /bid\s*(?:due|date|deadline)[:\s]+(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i,
+    );
+    // Normalize date to "Mon DD" format
+    let bidDate = bidDateRaw;
+    if (bidDateRaw) {
+      try {
+        const parsed = new Date(bidDateRaw);
+        if (!isNaN(parsed.getTime())) {
+          bidDate = parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        }
+      } catch { /* leave as-is */ }
+    }
+
+    // Drawing level
+    const levelRaw = find(
+      /(?:drawing|document|doc)\s*(?:stage|level|set)[:\s]+(.+)/i,
+      /(\d{2,3}%\s*(?:CD|DD|SD|CDs?|DDs?|SDs?)(?:\s*\+\s*add(?:endum)?\.?\s*\d+)?)/i,
+      /(?:100|90|75|50)%\s*(?:CD|DD|SD)/i,
+    );
+    // Match against known levels or keep raw
+    const matchedLevel = BID_LEVELS.find(l => levelRaw && l.toLowerCase().includes(levelRaw.toLowerCase().slice(0, 6)));
+
+    // Location — city/state
+    const location = find(
+      /(?:project\s+)?(?:location|address|city)[:\s]+(.+)/i,
+      /(?:site\s+)?(?:address)[:\s]+(.+)/i,
+    );
+
+    // Scope
+    const scope = find(
+      /scope(?:\s+of\s+(?:work|bid))?[:\s]+(.+)/i,
+      /(?:trade|work\s+type|description)[:\s]+(.+)/i,
+    );
+
+    // Plan room
+    const planRoom = find(
+      /(?:plan\s*room|plans?\s*(?:available|online|at|link)|download)[:\s]+(https?:\/\/\S+)/i,
+      /(https?:\/\/(?:planroom|buildingconnected|bid\.net|ebidboard|smartbidnet|constructconnect|builtopia|panel|pantera)\S+)/i,
+    );
+
+    // Contact info for GC
+    const contactName = find(
+      /(?:contact|estimator|rep|pm|project\s+manager)[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)/,
+      /(?:sincerely|regards|from)[,\s]+([A-Z][a-z]+ [A-Z][a-z]+)/,
+    );
+    const contactEmail = find(/([\w.+-]+@[\w.-]+\.[a-zA-Z]{2,})/);
+    const contactPhone = find(/(\(?\d{3}\)?[\s\-\.]\d{3}[\s\-\.]\d{4})/);
+    const contactTitle = find(/(?:title|role|position)[:\s]+(.+)/i);
+
+    setDraft(d => {
+      const newGcs = [...(d.gcs || [emptyGc()])];
+      if (gcCompany || contactName || contactEmail || contactPhone) {
+        newGcs[0] = {
+          ...newGcs[0],
+          company: gcCompany || newGcs[0].company,
+          contactName: contactName || newGcs[0].contactName,
+          contactTitle: contactTitle || newGcs[0].contactTitle,
+          contactEmail: contactEmail || newGcs[0].contactEmail,
+          contactPhone: contactPhone || newGcs[0].contactPhone,
+        };
+      }
+      return {
+        ...d,
+        name: projName || d.name,
+        gc: (gcCompany || newGcs[0].company) || d.gc,
+        gcs: newGcs,
+        bidDate: bidDate || d.bidDate,
+        level: matchedLevel || levelRaw || d.level,
+        location: location || d.location,
+        scope: scope || d.scope,
+        planRoom: planRoom || d.planRoom,
+        info: d.info || text.slice(0, 800),
+      };
+    });
+    flash('Fields extracted — review and confirm before saving');
   }
 
   function exportEstimatorPdf() {
@@ -269,10 +437,12 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
           <td style="padding:10px 12px;border-bottom:1px solid #ddd;font-weight:600">${b.name}</td>
           <td style="padding:10px 12px;border-bottom:1px solid #ddd">${b.gc}</td>
           <td style="padding:10px 12px;border-bottom:1px solid #ddd;font-weight:700;color:#b82a0e">${b.bidDate}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #ddd;color:#666">${b.entryDate || '—'}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #ddd;color:#666">${b.assignedDate || '—'}</td>
           <td style="padding:10px 12px;border-bottom:1px solid #ddd">${b.scope}</td>
           <td style="padding:10px 12px;border-bottom:1px solid #ddd">${b.level}</td>
           <td style="padding:10px 12px;border-bottom:1px solid #ddd">${b.location}</td>
-          <td style="padding:10px 12px;border-bottom:1px solid #ddd">${b.planRoom ? '<a href="' + b.planRoom + '">' + b.planRoom + '</a>' : '—'}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #ddd">${b.planRoom ? '<a href="' + b.planRoom + '" style="color:#b82a0e">' + b.planRoom + '</a>' : '—'}</td>
         </tr>`).join('');
       const nextBid = personBids.slice().sort((a, b) => a.bidDate.localeCompare(b.bidDate))[0];
       return `
@@ -287,7 +457,7 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
           <table style="width:100%;border-collapse:collapse;font-size:12.5px">
             <thead>
               <tr style="background:#f3f2f2">
-                ${['PROJECT','GC','BID DATE','SCOPE','DRAWINGS','LOCATION','PLAN ROOM'].map(h => `<th style="text-align:left;padding:6px 12px;font-size:10px;letter-spacing:.12em;color:#666;font-weight:500;border-bottom:2px solid #201e1d">${h}</th>`).join('')}
+                ${['PROJECT','GC','BID DATE','ENTRY DATE','ASSIGNED DATE','SCOPE','DRAWINGS','LOCATION','PLAN ROOM'].map(h => `<th style="text-align:left;padding:6px 12px;font-size:10px;letter-spacing:.12em;color:#666;font-weight:500;border-bottom:2px solid #201e1d">${h}</th>`).join('')}
               </tr>
             </thead>
             <tbody>${bidRows}</tbody>
@@ -354,8 +524,8 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
       </div>
 
       {/* stat row */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
-        {[['AWAITING DECISION', pending, 'var(--color-text)'], ['ACCEPTED', accepted, '#1f7a4d'], ['DECLINED', declined, 'var(--color-accent)']].map(([label, n, color], i) => (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
+        {[['AWAITING DECISION', pending, 'var(--color-text)'], ['IN REVIEW', inReview, 'oklch(0.50 0.18 240)'], ['ACCEPTED', accepted, '#1f7a4d'], ['DECLINED', declined, 'var(--color-accent)'], ['ARCHIVED', archived, 'var(--color-neutral-500)']].map(([label, n, color], i) => (
           <div key={label as string} style={{ padding: '16px 28px', borderLeft: i > 0 ? '1px solid var(--color-divider)' : 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
             <div style={{ font: '500 11px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-600)' }}>{label as string}</div>
             <div style={{ font: '800 34px/1 var(--font-heading)', color: color as string }}>{n as number}</div>
@@ -369,24 +539,68 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
           <div style={{ padding: '14px 28px', borderBottom: '1px solid var(--color-divider)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexShrink: 0 }}>
             <div style={{ font: '800 20px/1 var(--font-heading)' }}>Projects out for bid</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <Seg value={filter} onChange={setFilter} options={[{ value: 'all', label: 'ALL' }, { value: 'pending', label: 'AWAITING' }, { value: 'accepted', label: 'ACCEPTED' }, { value: 'declined', label: 'DECLINED' }]} />
+              <Seg value={filter} onChange={setFilter} options={[{ value: 'all', label: 'ALL' }, { value: 'pending', label: 'AWAITING' }, { value: 'review', label: 'IN REVIEW' }, { value: 'accepted', label: 'ACCEPTED' }, { value: 'declined', label: 'DECLINED' }, { value: 'archived', label: 'ARCHIVE' }]} />
               <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search GC, scope or location" style={{ ...inp, width: 240, padding: '8px 12px' }} />
             </div>
           </div>
 
-          {/* card grid */}
+          {/* card grid / archive list */}
           <div style={{ flex: 1, overflow: 'auto', padding: '24px 28px' }}>
             {filtered.length === 0 && <div style={{ font: '500 14px/1.5 var(--font-body)', color: 'var(--color-neutral-600)', paddingTop: 20 }}>No bids match this filter.</div>}
+
+            {/* ── ARCHIVE LIST VIEW ── */}
+            {filter === 'archived' && filtered.length > 0 && (
+              <table style={{ width: '100%', borderCollapse: 'collapse', font: '400 12.5px/1 var(--font-body)' }}>
+                <thead>
+                  <tr style={{ borderBottom: '2px solid var(--color-text)' }}>
+                    {['PROJECT', 'GC', 'SCOPE', 'BID DATE', 'ENTRY DATE', 'ASSIGNED DATE', 'ARCHIVED', 'STATUS', ''].map(h => (
+                      <th key={h} style={{ textAlign: 'left', padding: '8px 10px', font: '500 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', whiteSpace: 'nowrap' }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map(bid => {
+                    const col = BID_STATUS_COLOR[bid.status];
+                    const lbl = BID_STATUS_LABEL[bid.status];
+                    return (
+                      <tr key={bid.id} onClick={() => setDetailBid(bid)} style={{ borderBottom: '1px solid var(--color-divider)', cursor: 'pointer' }}
+                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-neutral-100)')}
+                        onMouseLeave={e => (e.currentTarget.style.background = '')}
+                      >
+                        <td style={{ padding: '10px', font: '600 13px/1.2 var(--font-heading)', maxWidth: 220 }}>{bid.name}</td>
+                        <td style={{ padding: '10px', color: 'var(--color-neutral-700)', whiteSpace: 'nowrap' }}>{bid.gc || '—'}</td>
+                        <td style={{ padding: '10px', color: 'var(--color-neutral-700)', maxWidth: 160 }}>{bid.scope || '—'}</td>
+                        <td style={{ padding: '10px', whiteSpace: 'nowrap', font: '500 12px/1 var(--font-body)' }}>{bid.bidDate || '—'}</td>
+                        <td style={{ padding: '10px', whiteSpace: 'nowrap', font: '500 12px/1 var(--font-body)', color: 'var(--color-neutral-600)' }}>{bid.entryDate || '—'}</td>
+                        <td style={{ padding: '10px', whiteSpace: 'nowrap', font: '500 12px/1 var(--font-body)', color: 'var(--color-neutral-600)' }}>{bid.assignedDate || '—'}</td>
+                        <td style={{ padding: '10px', whiteSpace: 'nowrap', font: '500 12px/1 var(--font-body)', color: 'var(--color-neutral-500)' }}>{bid.archivedAt || '—'}</td>
+                        <td style={{ padding: '10px' }}>
+                          <span style={{ padding: '3px 8px', background: col, color: '#fff', font: '700 9px/1 var(--font-body)', letterSpacing: '.1em', whiteSpace: 'nowrap' }}>{lbl}</span>
+                        </td>
+                        <td onClick={e => e.stopPropagation()} style={{ padding: '10px', whiteSpace: 'nowrap' }}>
+                          <button onClick={() => patchBid(bid.id, { archived: false, archivedAt: undefined })} style={{ padding: '5px 10px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 9px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>RESTORE</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+
+            {/* ── CARD GRID (all non-archive views) ── */}
+            {filter !== 'archived' && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 20 }}>
               {filtered.map(bid => {
                 const col = BID_STATUS_COLOR[bid.status];
                 const lbl = BID_STATUS_LABEL[bid.status];
+                const cardBg = bid.status === 'accepted' ? 'rgba(31,122,77,.07)' : bid.status === 'declined' ? 'rgba(236,48,19,.06)' : bid.status === 'review' ? 'rgba(80,80,220,.07)' : 'var(--color-bg)';
+                const cardBorder = bid.status === 'accepted' ? '2px solid rgba(31,122,77,.5)' : bid.status === 'declined' ? '2px solid rgba(236,48,19,.35)' : bid.status === 'review' ? '2px solid rgba(80,80,220,.35)' : '2px solid var(--color-text)';
                 return (
-                  <div key={bid.id} onClick={() => setDetailBid(bid)} style={{ border: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', background: 'var(--color-bg)', cursor: 'pointer' }}>
+                  <div key={bid.id} onClick={() => setDetailBid(bid)} style={{ border: cardBorder, display: 'flex', flexDirection: 'column', background: cardBg, cursor: 'pointer', transition: 'background .15s, border-color .15s' }}>
                     {/* photo slot */}
                     <div
                       onPaste={e => { e.stopPropagation(); handlePhotoPaste(bid.id, e); }}
-                      style={{ position: 'relative', height: 160, background: bid.photo ? 'none' : 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'default', overflow: 'hidden' }}
+                      style={{ position: 'relative', height: 220, background: bid.photo ? 'none' : 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'default', overflow: 'hidden' }}
                     >
                       {bid.photo
                         ? <img src={bid.photo} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
@@ -410,12 +624,18 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                       <div style={{ font: '800 15px/1.2 var(--font-heading)' }}>{bid.name}</div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                         {[['BID DATE', bid.bidDate || '—'], ['DRAWINGS', bid.level], ['LOCATION', bid.location || '—'], ['SCOPE', bid.scope || '—']].map(([l, v]) => (
-                          <div key={l} style={{ display: 'grid', gridTemplateColumns: '80px 1fr', gap: 6 }}>
+                          <div key={l} style={{ display: 'grid', gridTemplateColumns: '94px 1fr', gap: 6 }}>
                             <span style={{ font: '500 10px/1.4 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)' }}>{l}</span>
                             <span style={{ font: '400 11.5px/1.4 var(--font-body)' }}>{v}</span>
                           </div>
                         ))}
-                        {bid.planRoom && <div style={{ display: 'grid', gridTemplateColumns: '80px 1fr', gap: 6 }}><span style={{ font: '500 10px/1.4 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)' }}>PLAN ROOM</span><a href={bid.planRoom} target="_blank" rel="noreferrer" style={{ font: '400 11.5px/1.4 var(--font-body)', color: 'var(--color-accent-700)', wordBreak: 'break-all' }}>Open ↗</a></div>}
+                        {[['ENTRY DATE', bid.entryDate], ['ASSIGNED', bid.assignedDate]].map(([l, v]) => v ? (
+                          <div key={l} style={{ display: 'grid', gridTemplateColumns: '94px 1fr', gap: 6 }}>
+                            <span style={{ font: '500 10px/1.4 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)' }}>{l}</span>
+                            <span style={{ font: '500 11px/1.4 var(--font-body)', color: 'var(--color-neutral-500)' }}>{v}</span>
+                          </div>
+                        ) : null)}
+                        {bid.planRoom && <div style={{ display: 'grid', gridTemplateColumns: '94px 1fr', gap: 6 }}><span style={{ font: '500 10px/1.4 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)' }}>PLAN ROOM</span><a href={bid.planRoom} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()} style={{ font: '400 11.5px/1.4 var(--font-body)', color: 'var(--color-accent-700)', wordBreak: 'break-all' }}>Open ↗</a></div>}
                         {bid.notes && <div style={{ marginTop: 2, font: '400 11.5px/1.4 var(--font-body)', color: 'var(--color-neutral-700)', borderLeft: '2px solid var(--color-divider)', paddingLeft: 8 }}>{bid.notes}</div>}
                       </div>
 
@@ -428,21 +648,34 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                         </div>
                       )}
 
-                      {/* decline reason */}
+                      {/* decline / review reason */}
                       {bid.status === 'declined' && bid.declineReason && (
                         <div style={{ font: '400 11px/1.5 var(--font-body)', color: 'var(--color-neutral-600)', borderLeft: '2px solid var(--color-accent)', paddingLeft: 8 }}>
                           {bid.declineReason}{bid.declineNote ? ' — ' + bid.declineNote : ''}
                         </div>
                       )}
+                      {bid.status === 'review' && bid.reviewReason && (
+                        <div style={{ font: '400 11px/1.5 var(--font-body)', color: 'oklch(0.50 0.18 240)', borderLeft: '2px solid oklch(0.50 0.18 240)', paddingLeft: 8 }}>
+                          {bid.reviewReason}
+                        </div>
+                      )}
 
                       {/* actions */}
-                      <div onClick={e => e.stopPropagation()} style={{ display: 'flex', gap: 8, marginTop: 'auto', paddingTop: 10, borderTop: '1px solid var(--color-divider)' }}>
-                        {bid.status === 'pending' && <>
+                      <div onClick={e => e.stopPropagation()} style={{ display: 'flex', gap: 8, marginTop: 'auto', paddingTop: 10, borderTop: '1px solid var(--color-divider)', flexWrap: 'wrap' }}>
+                        {(bid.status === 'pending' || bid.status === 'review') && <>
                           <button onClick={() => openAssign(bid.id)} style={{ flex: 1, padding: '9px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>ACCEPT</button>
                           <button onClick={() => { setDeclineFor(bid.id); setDeclineReason(DECLINE_REASONS[0]); setDeclineNote(''); }} style={{ flex: 1, padding: '9px', background: 'none', color: 'var(--color-text)', border: '1px solid var(--color-text)', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>DECLINE</button>
+                          {bid.status === 'pending' && <button onClick={() => { setReviewFor(bid.id); setReviewReason(REVIEW_REASONS[0]); setReviewNote(''); }} style={{ padding: '7px 8px', background: 'none', border: '1px solid oklch(0.50 0.18 240)', font: '600 9px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'oklch(0.50 0.18 240)' }}>IN REVIEW</button>}
+                          {bid.status === 'review' && <button onClick={() => patchBid(bid.id, { status: 'pending', reviewReason: '' })} style={{ padding: '7px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 9px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>UNMARK</button>}
                         </>}
                         {bid.status === 'accepted' && (
                           <button onClick={() => openAssign(bid.id)} style={{ padding: '7px 12px', background: 'none', border: '1px solid var(--color-text)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>REASSIGN</button>
+                        )}
+                        {!bid.archived && (
+                          <button onClick={() => { const todayStr = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); patchBid(bid.id, { archived: true, archivedAt: todayStr }); flash('Bid archived'); }} style={{ padding: '7px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 9px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>ARCHIVE</button>
+                        )}
+                        {bid.archived && (
+                          <button onClick={() => patchBid(bid.id, { archived: false, archivedAt: undefined })} style={{ padding: '7px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 9px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>RESTORE</button>
                         )}
                       </div>
                     </div>
@@ -450,6 +683,7 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                 );
               })}
             </div>
+            )}
           </div>
         </>
       ) : (
@@ -475,8 +709,8 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                 <table style={{ width: '100%', borderCollapse: 'collapse', font: '400 12.5px/1 var(--font-body)' }}>
                   <thead>
                     <tr>
-                      {['PROJECT', 'GC', 'BID DATE', 'SCOPE', 'DRAWINGS'].map(h => (
-                        <th key={h} style={{ textAlign: 'left', padding: '6px 10px', font: '500 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', borderBottom: '1px solid var(--color-divider)' }}>{h}</th>
+                      {['PROJECT', 'GC', 'BID DATE', 'ENTRY DATE', 'ASSIGNED DATE', 'SCOPE', 'DRAWINGS', 'PLAN ROOM'].map(h => (
+                        <th key={h} style={{ textAlign: 'left', padding: '6px 10px', font: '500 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', borderBottom: '1px solid var(--color-divider)', whiteSpace: 'nowrap' }}>{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -484,10 +718,13 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                     {personBids.map(bid => (
                       <tr key={bid.id} style={{ borderBottom: '1px solid var(--color-divider)' }}>
                         <td style={{ padding: '10px', font: '600 13px/1 var(--font-body)' }}>{bid.name}</td>
-                        <td style={{ padding: '10px', color: 'var(--color-neutral-700)' }}>{bid.gc}</td>
-                        <td style={{ padding: '10px', font: '600 12px/1 var(--font-body)', color: 'var(--color-accent-700)' }}>{bid.bidDate}</td>
+                        <td style={{ padding: '10px', color: 'var(--color-neutral-700)', whiteSpace: 'nowrap' }}>{bid.gc}</td>
+                        <td style={{ padding: '10px', font: '600 12px/1 var(--font-body)', color: 'var(--color-accent-700)', whiteSpace: 'nowrap' }}>{bid.bidDate}</td>
+                        <td style={{ padding: '10px', color: 'var(--color-neutral-500)', whiteSpace: 'nowrap', font: '500 12px/1 var(--font-body)' }}>{bid.entryDate || '—'}</td>
+                        <td style={{ padding: '10px', color: 'var(--color-neutral-500)', whiteSpace: 'nowrap', font: '500 12px/1 var(--font-body)' }}>{bid.assignedDate || '—'}</td>
                         <td style={{ padding: '10px', color: 'var(--color-neutral-700)' }}>{bid.scope}</td>
-                        <td style={{ padding: '10px', color: 'var(--color-neutral-700)' }}>{bid.level}</td>
+                        <td style={{ padding: '10px', color: 'var(--color-neutral-700)', whiteSpace: 'nowrap' }}>{bid.level}</td>
+                        <td style={{ padding: '10px' }}>{bid.planRoom ? <a href={bid.planRoom} target="_blank" rel="noreferrer" style={{ font: '600 11px/1 var(--font-body)', color: 'var(--color-accent)', whiteSpace: 'nowrap' }}>Open ↗</a> : <span style={{ color: 'var(--color-neutral-400)' }}>—</span>}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -508,7 +745,7 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
         const lbl = BID_STATUS_LABEL[bid.status];
         return (
           <div onClick={() => setDetailBid(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.6)', display: 'grid', placeItems: 'center', zIndex: 90 }}>
-            <div onClick={e => e.stopPropagation()} style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 760, maxWidth: '96vw', maxHeight: '92vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div onClick={e => e.stopPropagation()} style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 980, maxWidth: '96vw', maxHeight: '94vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
               {/* modal header */}
               <div style={{ padding: '14px 20px', borderBottom: '2px solid var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -523,13 +760,13 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
               {/* modal body */}
               <div style={{ flex: 1, overflow: 'auto', display: 'flex', minHeight: 0 }}>
                 {/* photo column */}
-                <div style={{ width: 300, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ width: 380, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column' }}>
                   <div
                     onPaste={e => handlePhotoPaste(bid.id, e)}
-                    style={{ flex: 1, minHeight: 260, background: bid.photo ? 'none' : 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }}
+                    style={{ flex: 1, minHeight: 340, background: bid.photo ? '#000' : 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' }}
                   >
                     {bid.photo
-                      ? <img src={bid.photo} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      ? <img src={bid.photo} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
                       : <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: 24, textAlign: 'center' }}>
                           <div style={{ font: '300 32px/1', color: 'var(--color-neutral-400)' }}>⬜</div>
                           <div style={{ font: '600 11px/1.4 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-500)' }}>PASTE PHOTO HERE</div>
@@ -559,10 +796,10 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                 </div>
                 {/* info column */}
                 <div style={{ flex: 1, overflow: 'auto', padding: '24px 24px' }}>
-                  <div style={{ font: '600 11px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-accent)', marginBottom: 6 }}>{bid.gc || 'GC TO BE CONFIRMED'}</div>
-                  <div style={{ font: '800 22px/1.2 var(--font-heading)', marginBottom: 20 }}>{bid.name}</div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
-                    {[['BID DATE', bid.bidDate || '—'], ['DRAWING LEVEL', bid.level], ['LOCATION', bid.location || '—'], ['SCOPE', bid.scope || '—']].map(([l, v]) => (
+                  <div style={{ font: '800 22px/1.2 var(--font-heading)', marginBottom: 16 }}>{bid.name}</div>
+                  {/* project fields */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 20 }}>
+                    {[['BID DATE', bid.bidDate || '—'], ['DRAWING LEVEL', bid.level || '—'], ['LOCATION', bid.location || '—'], ['SCOPE', bid.scope || '—']].map(([l, v]) => (
                       <div key={l}>
                         <div style={{ font: '500 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', marginBottom: 5 }}>{l}</div>
                         <div style={{ font: '600 13px/1.4 var(--font-body)' }}>{v}</div>
@@ -570,11 +807,38 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                     ))}
                   </div>
                   {bid.planRoom && (
-                    <div style={{ marginBottom: 16 }}>
+                    <div style={{ marginBottom: 20 }}>
                       <div style={{ font: '500 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', marginBottom: 5 }}>PLAN ROOM</div>
                       <a href={bid.planRoom} target="_blank" rel="noreferrer" style={{ font: '600 13px/1 var(--font-body)', color: 'var(--color-accent)', wordBreak: 'break-all' }}>Open plan room ↗</a>
                     </div>
                   )}
+                  {/* GC contacts */}
+                  {(() => {
+                    const gcs = bid.gcs?.filter(g => g.company) || (bid.gc ? [{ company: bid.gc, location: '', contactName: '', contactTitle: '', contactEmail: '', contactPhone: '' }] : []);
+                    if (!gcs.length) return null;
+                    return (
+                      <div style={{ marginBottom: 20 }}>
+                        <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.12em', marginBottom: 10, paddingBottom: 6, borderBottom: '1px solid var(--color-divider)' }}>GENERAL CONTRACTOR{gcs.length > 1 ? 'S' : ''}</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                          {gcs.map((gc, i) => (
+                            <div key={i} style={{ padding: '12px 14px', border: '1px solid var(--color-divider)', background: 'var(--color-neutral-50, var(--color-bg))' }}>
+                              <div style={{ font: '700 13px/1 var(--font-body)', marginBottom: 4 }}>{gc.company}{i === 0 && gcs.length > 1 ? <span style={{ font: '500 10px/1 var(--font-body)', color: 'var(--color-accent)', marginLeft: 8, letterSpacing: '.1em' }}>PRIMARY</span> : null}</div>
+                              {gc.location && <div style={{ font: '400 11.5px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginBottom: 8 }}>{gc.location}</div>}
+                              {gc.contactName && (
+                                <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 16px', alignItems: 'start' }}>
+                                  <div style={{ font: '600 12px/1.4 var(--font-body)' }}>{gc.contactName}{gc.contactTitle ? <span style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginLeft: 6 }}>{gc.contactTitle}</span> : null}</div>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'flex-start' }}>
+                                    {gc.contactEmail && <a href={'mailto:' + gc.contactEmail} style={{ font: '400 11.5px/1 var(--font-body)', color: 'var(--color-accent)' }}>{gc.contactEmail}</a>}
+                                    {gc.contactPhone && <a href={'tel:' + gc.contactPhone} style={{ font: '400 11.5px/1 var(--font-body)', color: 'var(--color-neutral-700)' }}>{gc.contactPhone}</a>}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {bid.info && (
                     <div style={{ marginBottom: 16 }}>
                       <div style={{ font: '500 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', marginBottom: 8 }}>PROJECT INFO</div>
@@ -587,8 +851,13 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                       <div style={{ font: '400 12.5px/1.6 var(--font-body)', borderLeft: '3px solid var(--color-accent)', paddingLeft: 12 }}>{bid.notes}</div>
                     </div>
                   )}
+                  {bid.archived && (
+                    <div style={{ padding: '10px 14px', background: 'var(--color-neutral-100)', border: '1px solid var(--color-divider)', marginBottom: 16 }}>
+                      <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)' }}>ARCHIVED{bid.archivedAt ? ' · ' + bid.archivedAt : ''}</div>
+                    </div>
+                  )}
                   {bid.status === 'declined' && bid.declineReason && (
-                    <div style={{ padding: '12px 14px', background: '#fff0ee', borderLeft: '3px solid var(--color-accent)' }}>
+                    <div style={{ padding: '12px 14px', background: '#fff0ee', borderLeft: '3px solid var(--color-accent)', marginBottom: 16 }}>
                       <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-accent)', marginBottom: 6 }}>DECLINED</div>
                       <div style={{ font: '400 12.5px/1.5 var(--font-body)' }}>{bid.declineReason}{bid.declineNote ? ' — ' + bid.declineNote : ''}</div>
                     </div>
@@ -668,59 +937,186 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
         </div>
       )}
 
-      {/* ── UPLOAD / EDIT MODAL ── */}
-      {showUpload && (
+      {/* ── IN REVIEW MODAL ── */}
+      {reviewFor && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.5)', display: 'grid', placeItems: 'center', zIndex: 90 }}>
-          <div style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 580, maxWidth: '96vw', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ padding: '16px 20px', borderBottom: '2px solid var(--color-text)', font: '800 16px/1 var(--font-heading)' }}>{editBid ? 'EDIT BID' : 'UPLOAD PROJECT'}</div>
-            <div style={{ flex: 1, overflow: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {/* ITB paste */}
-              <div style={{ background: 'var(--color-neutral-100)', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ font: '600 11px/1 var(--font-body)', letterSpacing: '.1em' }}>PASTE ITB EMAIL BODY — AUTO-FILL FIELDS</div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <textarea value={itbText} onChange={e => setItbText(e.target.value)} placeholder="Paste invitation to bid text here…" style={{ flex: 1, ...inp, minHeight: 56, resize: 'vertical', fontSize: 11 }} />
-                  <button onClick={parseItb} style={{ padding: '8px 12px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', alignSelf: 'flex-start' }}>PARSE</button>
-                </div>
+          <div style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 460, maxWidth: '92vw' }}>
+            <div style={{ padding: '16px 20px', borderBottom: '2px solid var(--color-text)', font: '800 16px/1 var(--font-heading)' }}>MARK AS IN REVIEW</div>
+            <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <Field label="REASON">
+                <select value={reviewReason} onChange={e => setReviewReason(e.target.value)} style={{ ...inp, appearance: 'none' }}>
+                  {REVIEW_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+              </Field>
+              <Field label="NOTE (OPTIONAL)">
+                <textarea value={reviewNote} onChange={e => setReviewNote(e.target.value)} placeholder="Any additional context…" style={{ ...inp, minHeight: 64, resize: 'vertical' }} />
+              </Field>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button onClick={() => {
+                  const reason = reviewReason + (reviewNote ? ' — ' + reviewNote : '');
+                  patchBid(reviewFor, { status: 'review', reviewReason: reason });
+                  setReviewFor(null); setReviewNote('');
+                  flash('Bid marked as In Review — will not auto-archive');
+                }} style={{ padding: '10px 18px', background: 'oklch(0.50 0.18 240)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>CONFIRM</button>
+                <Button variant="secondary" onClick={() => setReviewFor(null)}>CANCEL</Button>
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <div style={{ gridColumn: '1/-1' }}><Field label="PROJECT NAME">
-                  <input value={draft.name || ''} onChange={e => setDraft(d => ({ ...d, name: e.target.value }))} style={inp} autoFocus />
-                </Field></div>
-                <Field label="GENERAL CONTRACTOR">
-                  <input value={draft.gc || ''} onChange={e => setDraft(d => ({ ...d, gc: e.target.value }))} style={inp} />
-                </Field>
-                <Field label="BID DATE">
-                  <input value={draft.bidDate || ''} onChange={e => setDraft(d => ({ ...d, bidDate: e.target.value }))} placeholder="Sep 20" style={inp} />
-                </Field>
-                <Field label="DRAWING LEVEL">
-                  <select value={draft.level || '100% CD'} onChange={e => setDraft(d => ({ ...d, level: e.target.value }))} style={{ ...inp, appearance: 'none' }}>
-                    {BID_LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
-                  </select>
-                </Field>
-                <Field label="LOCATION">
-                  <input value={draft.location || ''} onChange={e => setDraft(d => ({ ...d, location: e.target.value }))} placeholder="City, ST" style={inp} />
-                </Field>
-                <div style={{ gridColumn: '1/-1' }}><Field label="SCOPE">
-                  <input value={draft.scope || ''} onChange={e => setDraft(d => ({ ...d, scope: e.target.value }))} placeholder="e.g. Curtain wall & storefront" style={inp} />
-                </Field></div>
-                <div style={{ gridColumn: '1/-1' }}><Field label="PLAN ROOM URL">
-                  <input value={draft.planRoom || ''} onChange={e => setDraft(d => ({ ...d, planRoom: e.target.value }))} placeholder="https://" style={inp} />
-                </Field></div>
-                <div style={{ gridColumn: '1/-1' }}><Field label="PROJECT INFO / ITB SUMMARY">
-                  <textarea value={draft.info || ''} onChange={e => setDraft(d => ({ ...d, info: e.target.value }))} style={{ ...inp, minHeight: 72, resize: 'vertical' }} />
-                </Field></div>
-                <div style={{ gridColumn: '1/-1' }}><Field label="INTERNAL NOTES">
-                  <textarea value={draft.notes || ''} onChange={e => setDraft(d => ({ ...d, notes: e.target.value }))} style={{ ...inp, minHeight: 56, resize: 'vertical' }} />
-                </Field></div>
-              </div>
-            </div>
-            <div style={{ padding: '14px 20px', borderTop: '2px solid var(--color-text)', display: 'flex', gap: 10 }}>
-              <Button onClick={saveDraft}>{editBid ? 'SAVE CHANGES' : 'ADD TO BOARD'}</Button>
-              <Button variant="secondary" onClick={() => { setShowUpload(false); setEditBid(null); setDraft(emptyDraft()); setItbText(''); }}>CANCEL</Button>
             </div>
           </div>
         </div>
       )}
+
+      {/* ── UPLOAD / EDIT MODAL ── */}
+      {showUpload && (() => {
+        const draftGcs: GcEntry[] = (draft.gcs && draft.gcs.length > 0) ? draft.gcs : [emptyGc()];
+        const patchGc = (i: number, patch: Partial<GcEntry>) => setDraft(d => {
+          const gs = [...(d.gcs || [emptyGc()])];
+          gs[i] = { ...gs[i], ...patch };
+          return { ...d, gcs: gs, gc: gs[0]?.company || '' };
+        });
+        const addGc = () => { if (draftGcs.length >= 4) return; setDraft(d => ({ ...d, gcs: [...(d.gcs || []), emptyGc()] })); };
+        const removeGc = (i: number) => setDraft(d => ({ ...d, gcs: (d.gcs || []).filter((_, j) => j !== i) }));
+        const photoFileRef = React.createRef<HTMLInputElement>();
+        const handleDraftPhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
+          const file = e.target.files?.[0]; if (!file) return;
+          const reader = new FileReader();
+          reader.onload = ev => setDraft(d => ({ ...d, photo: ev.target?.result as string }));
+          reader.readAsDataURL(file);
+        };
+        const handleDraftPhotoPaste = (e: React.ClipboardEvent) => {
+          const item = Array.from(e.clipboardData.items).find(i => i.type.startsWith('image/'));
+          if (!item) return;
+          const file = item.getAsFile(); if (!file) return;
+          const reader = new FileReader();
+          reader.onload = ev => setDraft(d => ({ ...d, photo: ev.target?.result as string }));
+          reader.readAsDataURL(file);
+        };
+        return (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.55)', display: 'grid', placeItems: 'center', zIndex: 90 }}>
+            <div style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 900, maxWidth: '98vw', maxHeight: '95vh', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ padding: '16px 24px', borderBottom: '2px solid var(--color-text)', font: '800 16px/1 var(--font-heading)', flexShrink: 0 }}>{editBid ? 'EDIT BID' : 'UPLOAD PROJECT'}</div>
+              <div style={{ flex: 1, overflow: 'auto', display: 'flex', gap: 0, minHeight: 0 }}>
+                {/* LEFT: photo + ITB parser */}
+                <div style={{ width: 300, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', gap: 0 }}>
+                  {/* photo area */}
+                  <div
+                    onPaste={handleDraftPhotoPaste}
+                    style={{ position: 'relative', height: 220, background: draft.photo ? 'none' : 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, overflow: 'hidden', borderBottom: '1px solid var(--color-divider)', cursor: 'default' }}
+                  >
+                    {draft.photo
+                      ? <img src={draft.photo} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }} />
+                      : <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: 20, textAlign: 'center' }}>
+                          <div style={{ font: '300 40px/1', color: 'var(--color-neutral-400)' }}>📷</div>
+                          <div style={{ font: '600 11px/1.4 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)' }}>PASTE PHOTO</div>
+                          <div style={{ font: '400 10px/1.4 var(--font-body)', color: 'var(--color-neutral-400)' }}>Ctrl+V / Cmd+V</div>
+                        </div>
+                    }
+                    <div style={{ position: 'absolute', bottom: 8, right: 8, display: 'flex', gap: 6 }}>
+                      <button onClick={() => photoFileRef.current?.click()} style={{ padding: '5px 9px', background: 'rgba(32,30,29,.75)', border: 'none', color: '#fff', font: '600 9px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>BROWSE</button>
+                      {draft.photo && <button onClick={() => setDraft(d => ({ ...d, photo: undefined }))} style={{ padding: '5px 9px', background: 'rgba(236,48,19,.85)', border: 'none', color: '#fff', font: '600 9px/1 var(--font-body)', cursor: 'pointer' }}>✕</button>}
+                    </div>
+                    <input ref={photoFileRef} type="file" accept="image/*" onChange={handleDraftPhoto} style={{ display: 'none' }} />
+                  </div>
+                  {/* ITB parser */}
+                  <div style={{ flex: 1, padding: '14px', display: 'flex', flexDirection: 'column', gap: 10, overflow: 'auto' }}>
+                    <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em' }}>AI DOCUMENT READER</div>
+                    <div style={{ font: '400 10px/1.5 var(--font-body)', color: 'var(--color-neutral-600)' }}>Paste an ITB email or bid document. The reader will extract project name, GC, bid date, drawing level, location, scope, and plan room link.</div>
+                    <textarea
+                      value={itbText}
+                      onChange={e => setItbText(e.target.value)}
+                      placeholder="Paste invitation to bid text here…"
+                      style={{ flex: 1, ...inp, minHeight: 120, resize: 'none', fontSize: 11 }}
+                    />
+                    <button onClick={parseItb} style={{ padding: '9px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>PARSE & AUTO-FILL</button>
+                  </div>
+                </div>
+                {/* RIGHT: form fields */}
+                <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  {/* Project info */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <div style={{ gridColumn: '1/-1' }}><Field label="PROJECT NAME">
+                      <input value={draft.name || ''} onChange={e => setDraft(d => ({ ...d, name: e.target.value }))} style={inp} autoFocus />
+                    </Field></div>
+                    <Field label="BID DATE">
+                      <input value={draft.bidDate || ''} onChange={e => setDraft(d => ({ ...d, bidDate: e.target.value }))} placeholder="Sep 20" style={inp} />
+                    </Field>
+                    <Field label="DRAWING LEVEL">
+                      <input
+                        value={draft.level || ''}
+                        onChange={e => setDraft(d => ({ ...d, level: e.target.value }))}
+                        list="bid-levels-list"
+                        placeholder="e.g. 100% CD or type custom"
+                        style={inp}
+                      />
+                      <datalist id="bid-levels-list">
+                        {BID_LEVELS.map(l => <option key={l} value={l} />)}
+                      </datalist>
+                    </Field>
+                    <Field label="LOCATION">
+                      <input value={draft.location || ''} onChange={e => setDraft(d => ({ ...d, location: e.target.value }))} placeholder="City, ST" style={inp} />
+                    </Field>
+                    <div style={{ gridColumn: '1/-1' }}><Field label="SCOPE OF WORK">
+                      <input value={draft.scope || ''} onChange={e => setDraft(d => ({ ...d, scope: e.target.value }))} placeholder="e.g. Curtain wall & storefront" style={inp} />
+                    </Field></div>
+                    <div style={{ gridColumn: '1/-1' }}><Field label="PLAN ROOM URL">
+                      <input value={draft.planRoom || ''} onChange={e => setDraft(d => ({ ...d, planRoom: e.target.value }))} placeholder="https://" style={inp} />
+                    </Field></div>
+                  </div>
+                  {/* GC section */}
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, paddingBottom: 8, borderBottom: '1px solid var(--color-divider)' }}>
+                      <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.12em' }}>GENERAL CONTRACTORS</div>
+                      <button onClick={addGc} style={{ padding: '4px 10px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>+ ADD GC</button>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      {draftGcs.map((gc, i) => (
+                        <div key={i} style={{ padding: '12px 14px', border: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 8, position: 'relative' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                            <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-accent)' }}>GC {i + 1}{i === 0 ? ' · PRIMARY' : ''}</div>
+                            {i > 0 && <button onClick={() => removeGc(i)} style={{ padding: '3px 7px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 9px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>REMOVE</button>}
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                            <Field label="COMPANY NAME">
+                              <input value={gc.company} onChange={e => patchGc(i, { company: e.target.value })} style={{ ...inp, fontSize: 12 }} />
+                            </Field>
+                            <Field label="OFFICE LOCATION">
+                              <input value={gc.location} onChange={e => patchGc(i, { location: e.target.value })} placeholder="City, ST" style={{ ...inp, fontSize: 12 }} />
+                            </Field>
+                            <Field label="CONTACT NAME">
+                              <input value={gc.contactName} onChange={e => patchGc(i, { contactName: e.target.value })} style={{ ...inp, fontSize: 12 }} />
+                            </Field>
+                            <Field label="TITLE">
+                              <input value={gc.contactTitle} onChange={e => patchGc(i, { contactTitle: e.target.value })} placeholder="Project Manager" style={{ ...inp, fontSize: 12 }} />
+                            </Field>
+                            <Field label="EMAIL">
+                              <input value={gc.contactEmail} onChange={e => patchGc(i, { contactEmail: e.target.value })} type="email" style={{ ...inp, fontSize: 12 }} />
+                            </Field>
+                            <Field label="PHONE">
+                              <input value={gc.contactPhone} onChange={e => patchGc(i, { contactPhone: e.target.value })} type="tel" placeholder="000-000-0000" style={{ ...inp, fontSize: 12 }} />
+                            </Field>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Notes */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
+                    <Field label="PROJECT INFO / ITB SUMMARY">
+                      <textarea value={draft.info || ''} onChange={e => setDraft(d => ({ ...d, info: e.target.value }))} style={{ ...inp, minHeight: 72, resize: 'vertical' }} />
+                    </Field>
+                    <Field label="INTERNAL NOTES">
+                      <textarea value={draft.notes || ''} onChange={e => setDraft(d => ({ ...d, notes: e.target.value }))} style={{ ...inp, minHeight: 48, resize: 'vertical' }} />
+                    </Field>
+                  </div>
+                </div>
+              </div>
+              <div style={{ padding: '14px 24px', borderTop: '2px solid var(--color-text)', display: 'flex', gap: 10, flexShrink: 0 }}>
+                <Button onClick={saveDraft}>{editBid ? 'SAVE CHANGES' : 'ADD TO BOARD'}</Button>
+                <Button variant="secondary" onClick={() => { setShowUpload(false); setEditBid(null); setDraft(emptyDraft()); setItbText(''); }}>CANCEL</Button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── CONFIRM DELETE ── */}
       {confirmDelete && (
@@ -743,14 +1139,15 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 function LoginScreen({ onLogin }: { onLogin: (id: string) => void }) {
-  const [mode, setMode] = useState<'login' | 'forgot' | 'reset'>('login');
   const [email, setEmail] = useState('');
   const [pw, setPw] = useState('');
   const [error, setError] = useState('');
 
-  function doLogin() {
-    const p = PEOPLE.find(x => x.email.toLowerCase() === email.trim().toLowerCase());
-    if (!p) { setError('That password does not match.'); return; }
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError('');
+    const p = PEOPLE.find(p => p.email.toLowerCase() === email.trim().toLowerCase());
+    if (!p) { setError('No account found for that email.'); return; }
     if (!pw) { setError('Enter your password.'); return; }
     onLogin(p.id);
   }
@@ -769,44 +1166,32 @@ function LoginScreen({ onLogin }: { onLogin: (id: string) => void }) {
         </div>
         <div style={{ font: '400 11.5px/1.6 var(--font-body)', color: 'var(--color-neutral-500)', maxWidth: '44ch' }}>Glass, glazing &amp; cladding — Division 08.</div>
       </div>
-
-      {/* right — form panel */}
-      <div style={{ padding: '52px 44px', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 20, borderLeft: '2px solid var(--color-text)', background: 'var(--color-bg)' }}>
-        {mode === 'login' && <>
-          <div>
-            <div style={{ font: '800 26px/1.05 var(--font-heading)' }}>SIGN IN</div>
-            <div style={{ ...T.meta, marginTop: 6 }}>Your work email and password.</div>
+      {/* right — sign-in form */}
+      <div style={{ padding: '52px 48px', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 32, background: 'var(--color-bg)' }}>
+        <div>
+          <div style={{ font: '800 26px/1 var(--font-heading)', marginBottom: 6 }}>Sign in</div>
+          <div style={{ font: '400 13px/1.5 var(--font-body)', color: 'var(--color-neutral-600)' }}>Use your Glass 1st email address.</div>
+        </div>
+        <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ font: '500 10px/1 var(--font-body)', letterSpacing: '.14em' }}>EMAIL</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@glass1st.net" autoComplete="email" style={{ ...inp, padding: '12px 14px', fontSize: 14 }} />
           </div>
-          <Field label="GLASS1ST EMAIL">
-            <input value={email} onChange={e => setEmail(e.target.value)} placeholder="BlakeNicholson@Glass1st.net" style={inp} />
-          </Field>
-          <Field label="PASSWORD">
-            <input type="password" value={pw} onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === 'Enter' && doLogin()} placeholder="••••••••" style={inp} />
-          </Field>
-          {error && <div style={{ padding: '10px 12px', background: 'var(--color-accent-100)', borderLeft: '3px solid var(--color-accent)', font: '600 12px/1.45 var(--font-body)', color: 'var(--color-accent-800)' }}>{error}</div>}
-          <Button onClick={doLogin} style={{ width: '100%', justifyContent: 'flex-start', padding: '14px 16px' }}>SIGN IN</Button>
-          <button onClick={() => setMode('forgot')} style={{ alignSelf: 'flex-start', background: 'none', border: 'none', font: '600 12px/1 var(--font-body)', letterSpacing: '.06em', color: 'var(--color-accent-700)', cursor: 'pointer', padding: 0 }}>Forgot your password?</button>
-          <div style={{ ...T.micro, marginTop: 4 }}>First sign in sets your password on this device.</div>
-        </>}
-        {mode === 'forgot' && <>
-          <div><div style={{ font: '800 26px/1.05 var(--font-heading)' }}>RESET PASSWORD</div><div style={{ ...T.meta, marginTop: 6 }}>We send a six-digit code to your Glass1st address.</div></div>
-          <Field label="GLASS1ST EMAIL"><input value={email} onChange={e => setEmail(e.target.value)} style={inp} /></Field>
-          <Button onClick={() => setMode('reset')} style={{ width: '100%', justifyContent: 'flex-start', padding: '14px 16px' }}>SEND RESET CODE</Button>
-          <button onClick={() => setMode('login')} style={{ alignSelf: 'flex-start', background: 'none', border: 'none', font: '600 12px/1 var(--font-body)', color: 'var(--color-accent-700)', cursor: 'pointer', padding: 0 }}>← Back to sign in</button>
-        </>}
-        {mode === 'reset' && <>
-          <div><div style={{ font: '800 26px/1.05 var(--font-heading)' }}>NEW PASSWORD</div></div>
-          <Field label="RESET CODE"><input placeholder="000000" style={{ ...inp, letterSpacing: '.2em', font: '600 16px/1 var(--font-body)' }} /></Field>
-          <Field label="NEW PASSWORD"><input type="password" style={inp} /></Field>
-          <Field label="CONFIRM PASSWORD"><input type="password" style={inp} /></Field>
-          <Button onClick={() => setMode('login')} style={{ width: '100%', justifyContent: 'flex-start', padding: '14px 16px' }}>SAVE NEW PASSWORD</Button>
-        </>}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ font: '500 10px/1 var(--font-body)', letterSpacing: '.14em' }}>PASSWORD</label>
+            <input type="password" value={pw} onChange={e => setPw(e.target.value)} placeholder="••••••••" autoComplete="current-password" style={{ ...inp, padding: '12px 14px', fontSize: 14 }} />
+          </div>
+          {error && <div style={{ font: '500 12px/1.4 var(--font-body)', color: 'var(--color-accent)', padding: '10px 14px', background: '#fff0ee', border: '1px solid var(--color-accent)' }}>{error}</div>}
+          <button type="submit" style={{ marginTop: 4, padding: '14px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 13px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>SIGN IN →</button>
+        </form>
+        <div style={{ font: '400 12px/1.5 var(--font-body)', color: 'var(--color-neutral-500)' }}>
+          Forgot your password? Contact your manager or IT to reset your account.
+        </div>
       </div>
     </div>
   );
 }
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
 function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void }) {
   const [st, setSt] = useState<AppState>(() => initState(userId));
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -876,24 +1261,6 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
     setSt(s => ({ ...s, projNotes: { ...s.projNotes, [projectId]: [...(s.projNotes[projectId] || []), entry] } }));
     return true;
   }
-  function addRevision() {
-    const d = st.revDraft; const id = st.dealId;
-    if (!num(d.price)) { flash('Enter the sell price'); return; }
-    if (!num(d.cost)) { flash('Cost is required — a revision must carry a real GP'); return; }
-    const revList = st.revisions[id] || [];
-    const rev = 'R' + revList.length;
-    const when = new Date().toLocaleString([], { month: 'short', day: '2-digit', hour: 'numeric', minute: '2-digit' });
-    const entry: Revision = { rev, label: d.label.trim() || 'Revision', price: String(num(d.price)), cost: String(num(d.cost)), when, who: me.name, note: d.note.trim() };
-    setSt(s => ({ ...s, revisions: { ...s.revisions, [id]: [...(s.revisions[id] || []), entry] }, revDraft: { label: '', price: '', cost: '', note: '' }, deals: { ...s.deals, [id]: { ...s.deals[id], price: entry.price, cost: entry.cost } as Deal } }));
-    flash(rev + ' logged · ' + money(num(entry.price)));
-  }
-  function addFollowUp() {
-    if (!st.followDate) { flash('Pick a date'); return; }
-    const id = st.dealId;
-    const entry: FollowUp = { id: 'fu' + Date.now(), date: st.followDate, note: st.followNote, by: me.name, done: false };
-    setSt(s => ({ ...s, followDate: '', followNote: '', followUps: { ...s.followUps, [id]: [...(s.followUps[id] || []), entry] } }));
-    flash('Follow-up set for ' + st.followDate);
-  }
   function saveQuickNote() {
     const ok = logNote(st.quickNote.projectId, st.quickNote.text, st.quickNote.tag);
     if (ok) setSt(s => ({ ...s, showQuickNote: false, quickNote: { ...s.quickNote, text: '' } }));
@@ -919,20 +1286,11 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
     if (isManager) return PEOPLE.filter(p => p.mgr === userId);
     return [me];
   }
-  function effStage(id: string): CrmStage {
-    if (st.closedProjects[id]) return 'Sold';
-    const d = st.deals[id];
-    const manual: CrmStage[] = ['Feeling Good', 'Neutral', 'At Risk', 'Sold', 'Lost', 'No bid'];
-    if (d && manual.includes(d.stage)) return d.stage;
-    return st.tasks.some(t => t.projectId === id && t.status !== 'Complete') ? 'Bidding' : 'Neutral';
-  }
-
   const projects = visibleProjects();
   const openIssues = st.issues.filter(i => i.status === 'open');
-  const followCount = Object.values(st.followUps).reduce((a, fus) => a + fus.filter(fu => !fu.done).length, 0);
   const mgrPerson = PEOPLE.find(p => p.id === me.mgr);
 
-  const allFocusProjs = projects.map(p => {
+  const allFocusProjsUnordered = projects.map(p => {
     const ts = st.tasks.filter(t => t.projectId === p.id && (isManager || t.who === userId));
     if (!ts.length) return null;
     const override = st.projStatusOverride[p.id] as OverrideKey | undefined;
@@ -940,40 +1298,51 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
     const k: StatusKey = meta ? meta.statusKey : projStatusKey(ts);
     const displayColor = meta ? meta.color : STATUS[k];
     const displayLabel = meta ? meta.label : projStatusWord(k);
-    return { id: p.id, key: k, override: override || null, displayColor, displayLabel, rank: k === 'urgent' ? 0 : k === 'awaiting' ? 1 : k === 'good' ? 2 : 3 };
-  }).filter((x): x is NonNullable<typeof x> => x !== null).sort((a, b) => a.rank - b.rank);
+    return { id: p.id, key: k, override: override || null, displayColor, displayLabel, rank: 0 };
+  }).filter((x): x is NonNullable<typeof x> => x !== null);
+  const allFocusProjs = (() => {
+    const saved = st.focusProjOrder || [];
+    const activeIds = allFocusProjsUnordered.map(p => p.id);
+    const order = saved.filter(id => activeIds.includes(id));
+    const unplaced = activeIds.filter(id => !order.includes(id));
+    return [...order, ...unplaced].map(id => allFocusProjsUnordered.find(p => p.id === id)!);
+  })();
   const focusId = st.focusProjectId || allFocusProjs[0]?.id || projects[0]?.id || null;
   const focusProject = projects.find(p => p.id === focusId);
   const focusTasks = st.tasks.filter(t => t.projectId === focusId);
   const openTask = st.openTaskId ? st.tasks.find(t => t.id === st.openTaskId) : undefined;
 
-  function setDeal(id: string, patch: Partial<Deal>) {
-    setSt(s => ({ ...s, deals: { ...s.deals, [id]: { ...(s.deals[id] || {}), ...patch } as Deal } }));
-  }
+  const tcUnread = Object.entries(st.tcMessages || {}).filter(([key, msgs]) => {
+    const last = msgs[msgs.length - 1];
+    return last && last.from !== userId && last.at > (st.tcReadAt[key] || 0);
+  }).length;
 
   const navItems: Array<[View, string, number]> = isManager
     ? [['myday', 'My day', st.tasks.filter(t => t.who === userId && t.status !== 'Complete').length],
       ['overview', 'Management overview', st.tasks.filter(t => t.status !== 'Complete' && teamOf().some(p => p.id === t.who)).length],
       ['calendar', 'Calendar', 0], ['capacity', 'Capacity', 0],
-      ['projects', 'Projects', projects.length]]
+      ['projects', 'Projects', projects.length],
+      ['teamconnection', 'Team Connection', tcUnread],
+      ['resources', 'Resources', 0]]
     : [['myday', 'My day', st.tasks.filter(t => t.who === userId && t.status !== 'Complete').length],
       ['calendar', 'Calendar', 0], ['projects', 'Projects', projects.length],
-      ['capacity', 'My capacity', 0]];
+      ['teamconnection', 'Team Connection', tcUnread],
+      ['capacity', 'My capacity', 0],
+      ['resources', 'Resources', 0]];
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--color-bg)', overflow: 'hidden' }}>
       {/* ── top tab strip ── */}
       <div style={{ display: 'flex', alignItems: 'stretch', height: 38, background: 'var(--color-text)', flexShrink: 0, zIndex: 50 }}>
-        {(['board', 'tracker', 'crm'] as AppTab[]).map(a => (
+        {(['board', 'tracker'] as AppTab[]).map(a => (
           <button key={a} onClick={() => setSt(s => ({ ...s, app: a }))} style={{ padding: '0 22px', border: 'none', cursor: 'pointer', background: st.app === a ? 'var(--color-accent)' : 'transparent', color: '#fff', font: '600 11px/1 var(--font-body)', letterSpacing: '.12em' }}>
-            {a === 'board' ? 'BID BOARD' : a === 'tracker' ? 'TASK TRACKER' : 'CRM'}
+            {a === 'board' ? 'BID BOARD' : 'TASK TRACKER'}
           </button>
         ))}
       </div>
 
-      {st.app === 'board' ? (
-        <BidBoardView st={st} setSt={setSt} me={me} flash={flash} onSignOut={onSignOut} />
-      ) : st.app === 'tracker' ? (
+      {st.app === 'board' && <BidBoardView st={st} setSt={setSt} me={me} flash={flash} onSignOut={onSignOut} />}
+      {st.app === 'tracker' && (
         <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}>
           {/* ── sidebar ── */}
           <div style={{ width: 240, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', background: 'var(--color-neutral-100)', overflow: 'hidden' }}>
@@ -1020,14 +1389,12 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
               {st.view === 'calendar' && <CalendarView st={st} setSt={setSt} me={me} isManager={isManager} onSignOut={onSignOut} flash={flash} />}
               {st.view === 'capacity' && <CapacityView st={st} setSt={setSt} me={me} isManager={isManager} team={teamOf()} onSignOut={onSignOut} />}
               {st.view === 'projects' && <ProjectsView st={st} setSt={setSt} me={me} isManager={isManager} projects={projects} setTaskStatus={setTaskStatus} flash={flash} logNote={logNote} onSignOut={onSignOut} />}
+              {st.view === 'teamconnection' && <TeamConnectionView st={st} setSt={setSt} me={me} isManager={isManager} />}
+              {st.view === 'resources' && <ResourcesView st={st} setSt={setSt} me={me} />}
             </div>
           </div>
         </div>
-      ) : (
-        <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}>
-          <CrmSection st={st} setSt={setSt} me={me} projects={PROJECTS} effStage={effStage} addRevision={addRevision} addFollowUp={addFollowUp} flash={flash} followCount={followCount} setDeal={setDeal} logNote={logNote} />
-        </div>
-      ) }
+      )}
 
       {/* ── task panel ── */}
       {openTask && <TaskPanel task={openTask} me={me} isManager={isManager} st={st} setSt={setSt} setTaskStatus={setTaskStatus} addTaskNote={addTaskNote} raiseIssue={raiseIssue} mgrPerson={mgrPerson} />}
@@ -1155,6 +1522,8 @@ function MyDayView({ st, setSt, me, isManager, onSignOut, focusId, focusProject,
   setTaskStatus: (id: string, s: TaskStatus) => void; flash: (m: string) => void;
 }) {
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
   const t0 = today0(); const wkStart = mondayOf(t0);
   const weekBars = WEEKDAY_LABELS.map((d, i) => {
     const date = addDays(wkStart, i); const key = ymd(date);
@@ -1305,14 +1674,42 @@ function MyDayView({ st, setSt, me, isManager, onSignOut, focusId, focusProject,
                   const proj = PROJECTS.find(p => p.id === row.id)!;
                   const selected = row.id === focusId;
                   const current = row.override as OverrideKey | null;
+                  const isDragging = dragId === row.id;
+                  const isOver = dragOverId === row.id && dragId !== row.id;
                   return (
-                    <div key={row.id} style={{ borderBottom: '1px solid var(--color-divider)', borderLeft: selected ? '3px solid var(--color-text)' : '3px solid transparent' }}>
-                      <button onClick={() => setSt(s => ({ ...s, focusProjectId: row.id }))} style={{ width: '100%', textAlign: 'left', padding: '10px 8px', background: selected ? 'var(--color-bg)' : 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 9 }}>
-                        {/* custom dot using override color */}
-                        <span style={{ width: 9, height: 9, flexShrink: 0, background: row.displayColor }} />
-                        <span style={{ font: '600 13px/1 var(--font-body)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{proj.short || proj.name}</span>
-                        <span style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', color: row.displayColor, flexShrink: 0 }}>{row.displayLabel}</span>
-                      </button>
+                    <div
+                      key={row.id}
+                      draggable
+                      onDragStart={() => setDragId(row.id)}
+                      onDragEnd={() => { setDragId(null); setDragOverId(null); }}
+                      onDragOver={e => { e.preventDefault(); setDragOverId(row.id); }}
+                      onDrop={() => {
+                        if (!dragId || dragId === row.id) return;
+                        const ids = allFocusProjs.map(p => p.id);
+                        const from = ids.indexOf(dragId);
+                        const to = ids.indexOf(row.id);
+                        const next = [...ids];
+                        next.splice(from, 1);
+                        next.splice(to, 0, dragId);
+                        setSt(s => ({ ...s, focusProjOrder: next }));
+                        setDragId(null); setDragOverId(null);
+                      }}
+                      style={{ borderBottom: '1px solid var(--color-divider)', borderLeft: selected ? '3px solid var(--color-text)' : '3px solid transparent', opacity: isDragging ? 0.4 : 1, borderTop: isOver ? '2px solid var(--color-accent)' : undefined }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'stretch' }}>
+                        <div style={{ width: 22, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'grab', borderRight: '1px solid var(--color-divider)', padding: '0 4px' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 3, pointerEvents: 'none' }}>
+                            <div style={{ width: 12, height: 1.5, background: 'var(--color-neutral-400)' }} />
+                            <div style={{ width: 12, height: 1.5, background: 'var(--color-neutral-400)' }} />
+                            <div style={{ width: 12, height: 1.5, background: 'var(--color-neutral-400)' }} />
+                          </div>
+                        </div>
+                        <button onClick={() => setSt(s => ({ ...s, focusProjectId: row.id }))} style={{ flex: 1, textAlign: 'left', padding: '10px 8px', background: selected ? 'var(--color-bg)' : 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+                          <span style={{ width: 9, height: 9, flexShrink: 0, background: row.displayColor }} />
+                          <span style={{ font: '600 13px/1 var(--font-body)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{proj.short || proj.name}</span>
+                          <span style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', color: row.displayColor, flexShrink: 0 }}>{row.displayLabel}</span>
+                        </button>
+                      </div>
                       {selected && (
                         <div style={{ display: 'flex', borderTop: '1px solid var(--color-divider)' }}>
                           {(Object.entries(OVERRIDE_META) as Array<[OverrideKey, typeof OVERRIDE_META[OverrideKey]]>).map(([key, meta]) => {
@@ -1600,6 +1997,7 @@ function CalendarView({ st, setSt, me, isManager, onSignOut, flash, teamMode, te
   onSignOut: () => void; flash: (m: string) => void; teamMode?: boolean; team?: Person[];
 }) {
   const [personFilter, setPersonFilter] = useState<string>('ALL');
+  const [calMode, setCalMode] = useState<'week' | 'month'>('week');
   const t0 = today0(); const wkStart = addDays(mondayOf(t0), st.calOff * 7);
   const displayTeam = teamMode && team ? team : undefined;
   const people = displayTeam || [me];
@@ -1624,14 +2022,16 @@ function CalendarView({ st, setSt, me, isManager, onSignOut, flash, teamMode, te
       <div style={{ padding: '16px 28px', borderBottom: '2px solid var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexShrink: 0, flexWrap: 'wrap' }}>
         <div>
           <div style={{ font: '800 20px/1 var(--font-heading)' }}>{teamMode ? 'TEAM CALENDAR' : 'MY SCHEDULE'}</div>
-          <div style={{ font: '500 13px/1 var(--font-body)', letterSpacing: '.08em', color: 'var(--color-neutral-600)', marginTop: 6 }}>WEEK OF {prettyShort(wkStart).toUpperCase()} · {totalHrs} SCHEDULED</div>
+          <div style={{ font: '500 13px/1 var(--font-body)', letterSpacing: '.08em', color: 'var(--color-neutral-600)', marginTop: 6 }}>
+            {calMode === 'week' ? 'WEEK OF ' + prettyShort(wkStart).toUpperCase() + ' · ' + totalHrs + 'H SCHEDULED' : (() => { const ref = calMode === 'month' ? addDays(mondayOf(t0), st.calOff * 7 * 4) : wkStart; return ref.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }).toUpperCase(); })()}
+          </div>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <Seg value={calMode} onChange={setCalMode} options={[{ value: 'week', label: 'WEEK' }, { value: 'month', label: 'MONTH' }]} />
           {displayTeam && displayTeam.length > 1 && (
             <Seg value={personFilter} onChange={setPersonFilter} options={[{ value: 'ALL', label: 'ALL' + (displayTeam ? ' · ' + displayTeam.length : '') }, ...displayTeam.map(p => ({ value: p.id, label: p.initials }))]} />
           )}
           <button onClick={() => setSt(s => ({ ...s, calOff: s.calOff - 1 }))} style={{ padding: '10px 14px', border: '2px solid var(--color-text)', background: 'none', font: '700 14px/1 var(--font-body)', cursor: 'pointer' }}>◀</button>
-          <button onClick={() => setSt(s => ({ ...s, calOff: 0 }))} style={{ padding: '10px 16px', border: '2px solid var(--color-text)', background: 'none', font: '700 13px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>TODAY</button>
           <button onClick={() => setSt(s => ({ ...s, calOff: s.calOff + 1 }))} style={{ padding: '10px 14px', border: '2px solid var(--color-text)', background: 'none', font: '700 14px/1 var(--font-body)', cursor: 'pointer' }}>▶</button>
           <button onClick={() => {
             const rows = st.tasks.filter(t => filteredPeople.some(p => p.id === t.who) && t.status !== 'Complete' && t.date);
@@ -1646,37 +2046,98 @@ function CalendarView({ st, setSt, me, isManager, onSignOut, flash, teamMode, te
           }} style={{ padding: '10px 16px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 12px/1 var(--font-body)', letterSpacing: '.09em', cursor: 'pointer', whiteSpace: 'nowrap' }}>ADD TO MY CALENDAR</button>
         </div>
       </div>
-      {/* grid — only show Mon–Fri (indices 1–5) */}
-      <div style={{ flex: 1, overflow: 'auto', display: 'grid', gridTemplateColumns: 'repeat(5,1fr)' }}>
-        {days.filter(d => d.dayName !== 'SAT' && d.dayName !== 'SUN').map(day => (
-          <div key={day.key} style={{ borderRight: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', minHeight: 320 }}>
-            {/* day header — fixed height so all columns align */}
-            <div style={{ height: 64, flexShrink: 0, padding: '0 16px', borderBottom: '2px solid ' + (day.isToday ? 'var(--color-accent)' : 'var(--color-divider)'), background: day.isToday ? 'var(--color-text)' : 'var(--color-neutral-100)', color: day.isToday ? '#fff' : 'var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div>
-                <div style={{ font: '800 15px/1 var(--font-heading)', letterSpacing: '.06em' }}>{day.dayName}</div>
-                <div style={{ font: '500 12px/1 var(--font-body)', opacity: .7, marginTop: 5 }}>{prettyShort(day.date)}</div>
+
+      {calMode === 'week' ? (
+        /* WEEK VIEW — Mon–Fri columns */
+        <div style={{ flex: 1, overflow: 'auto', display: 'grid', gridTemplateColumns: 'repeat(5,1fr)' }}>
+          {days.filter(d => d.dayName !== 'SAT' && d.dayName !== 'SUN').map(day => (
+            <div key={day.key} style={{ borderRight: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', minHeight: 320 }}>
+              <div style={{ height: 64, flexShrink: 0, padding: '0 16px', borderBottom: '2px solid ' + (day.isToday ? 'var(--color-accent)' : 'var(--color-divider)'), background: day.isToday ? 'var(--color-text)' : 'var(--color-neutral-100)', color: day.isToday ? '#fff' : 'var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div>
+                  <div style={{ font: '800 15px/1 var(--font-heading)', letterSpacing: '.06em' }}>{day.dayName}</div>
+                  <div style={{ font: '500 12px/1 var(--font-body)', opacity: .7, marginTop: 5 }}>{prettyShort(day.date)}</div>
+                </div>
+                {day.hrs > 0 && <span style={{ font: '800 20px/1 var(--font-heading)', color: day.isToday ? 'var(--color-accent-300)' : 'var(--color-accent)' }}>{day.hrs}h</span>}
               </div>
-              {day.hrs > 0 && <span style={{ font: '800 20px/1 var(--font-heading)', color: day.isToday ? 'var(--color-accent-300)' : 'var(--color-accent)' }}>{day.hrs}h</span>}
+              <div style={{ flex: 1, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8, overflow: 'auto' }}>
+                {day.tasks.length === 0 && <div style={{ font: '500 12px/1.5 var(--font-body)', color: 'var(--color-neutral-500)', paddingTop: 8 }}>—</div>}
+                {day.tasks.map(t => {
+                  const proj = PROJECTS.find(p => p.id === t.projectId);
+                  return (
+                    <button key={t.id} onClick={() => setSt(s => ({ ...s, openTaskId: t.id }))} style={{ textAlign: 'left', padding: '10px 12px', background: 'var(--color-bg)', cursor: 'pointer', border: 'none', borderLeftWidth: 4, borderLeftStyle: 'solid', borderLeftColor: statusColor(t.status), display: 'flex', flexDirection: 'column', gap: 5, boxShadow: '0 1px 3px rgba(0,0,0,.07)' }}>
+                      <span style={{ font: '600 13.5px/1.35 var(--font-body)' }}>{t.title}</span>
+                      <span style={{ font: '500 11.5px/1 var(--font-body)', color: 'var(--color-neutral-600)' }}>{proj?.short || t.projectId}</span>
+                      <span style={{ font: '600 11px/1 var(--font-body)', color: 'var(--color-accent-700)', letterSpacing: '.06em' }}>{personFirst(t.who)} · {t.hrs}h</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-            {/* task cards */}
-            <div style={{ flex: 1, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8, overflow: 'auto' }}>
-              {day.tasks.length === 0 && (
-                <div style={{ font: '500 12px/1.5 var(--font-body)', color: 'var(--color-neutral-500)', paddingTop: 8 }}>—</div>
-              )}
-              {day.tasks.map(t => {
-                const proj = PROJECTS.find(p => p.id === t.projectId);
-                return (
-                  <button key={t.id} onClick={() => setSt(s => ({ ...s, openTaskId: t.id }))} style={{ textAlign: 'left', padding: '10px 12px', background: 'var(--color-bg)', borderLeft: '4px solid ' + statusColor(t.status), cursor: 'pointer', border: 'none', borderLeftWidth: 4, borderLeftStyle: 'solid', borderLeftColor: statusColor(t.status), display: 'flex', flexDirection: 'column', gap: 5, boxShadow: '0 1px 3px rgba(0,0,0,.07)' }}>
-                    <span style={{ font: '600 13.5px/1.35 var(--font-body)' }}>{t.title}</span>
-                    <span style={{ font: '500 11.5px/1 var(--font-body)', color: 'var(--color-neutral-600)' }}>{proj?.short || t.projectId}</span>
-                    <span style={{ font: '600 11px/1 var(--font-body)', color: 'var(--color-accent-700)', letterSpacing: '.06em' }}>{personFirst(t.who)} · {t.hrs}h</span>
-                  </button>
-                );
-              })}
+          ))}
+        </div>
+      ) : (
+        /* MONTH VIEW */
+        (() => {
+          // Compute the month to display based on calOff (treat calOff as week offset, derive month from wkStart)
+          const refDate = wkStart;
+          const year = refDate.getFullYear();
+          const month = refDate.getMonth();
+          const firstOfMonth = new Date(year, month, 1);
+          const lastOfMonth = new Date(year, month + 1, 0);
+          // Grid starts on Monday before the 1st
+          const startDow = firstOfMonth.getDay(); // 0=Sun
+          const gridStart = addDays(firstOfMonth, -(startDow === 0 ? 6 : startDow - 1));
+          // Always show 6 rows = 42 cells
+          const cells = Array.from({ length: 42 }, (_, i) => {
+            const date = addDays(gridStart, i);
+            const key = ymd(date);
+            const inMonth = date.getMonth() === month;
+            const isToday = key === ymd(t0);
+            const cellTasks = st.tasks.filter(t =>
+              filteredPeople.some(p => p.id === t.who) && t.date === key && t.status !== 'Complete'
+            );
+            const hrs = cellTasks.reduce((a, t) => a + t.hrs, 0);
+            return { date, key, inMonth, isToday, tasks: cellTasks, hrs };
+          });
+          const DOW_LABELS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+          return (
+            <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+              {/* DOW header */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,minmax(0,1fr))', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
+                {DOW_LABELS.map(d => (
+                  <div key={d} style={{ padding: '10px 12px', font: '700 11px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', borderRight: '1px solid var(--color-divider)', textAlign: 'center' }}>{d}</div>
+                ))}
+              </div>
+              {/* weeks */}
+              <div style={{ flex: 1, display: 'grid', gridTemplateRows: 'repeat(6,1fr)', overflow: 'auto' }}>
+                {Array.from({ length: 6 }, (_, row) => (
+                  <div key={row} style={{ display: 'grid', gridTemplateColumns: 'repeat(7,minmax(0,1fr))', borderBottom: '1px solid var(--color-divider)' }}>
+                    {cells.slice(row * 7, row * 7 + 7).map(cell => (
+                      <div key={cell.key} style={{ borderRight: '1px solid var(--color-divider)', padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 4, minHeight: 90, minWidth: 0, overflow: 'hidden', background: cell.isToday ? 'var(--color-text)' : cell.inMonth ? 'var(--color-bg)' : 'var(--color-neutral-100)', color: cell.isToday ? '#fff' : cell.inMonth ? 'var(--color-text)' : 'var(--color-neutral-400)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+                          <span style={{ font: '700 13px/1 var(--font-heading)' }}>{cell.date.getDate()}</span>
+                          {cell.hrs > 0 && <span style={{ font: '600 10px/1 var(--font-body)', color: cell.isToday ? 'var(--color-accent-300)' : 'var(--color-accent)', letterSpacing: '.04em' }}>{cell.hrs}h</span>}
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, overflow: 'hidden', minWidth: 0 }}>
+                          {cell.tasks.slice(0, 3).map(t => {
+                            const proj = PROJECTS.find(p => p.id === t.projectId);
+                            return (
+                              <button key={t.id} onClick={() => setSt(s => ({ ...s, openTaskId: t.id }))} style={{ textAlign: 'left', padding: '3px 6px', background: cell.isToday ? 'rgba(255,255,255,.15)' : 'var(--color-neutral-200)', border: 'none', borderLeft: '3px solid ' + statusColor(t.status), cursor: 'pointer', font: '500 10px/1.3 var(--font-body)', color: cell.isToday ? '#fff' : 'var(--color-text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', width: '100%', display: 'block', maxWidth: '100%' }}>
+                                {t.title}{proj ? ' · ' + proj.short : ''}
+                              </button>
+                            );
+                          })}
+                          {cell.tasks.length > 3 && <div style={{ font: '500 10px/1 var(--font-body)', color: cell.isToday ? 'rgba(255,255,255,.7)' : 'var(--color-neutral-600)', paddingLeft: 6 }}>+{cell.tasks.length - 3} more</div>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          );
+        })()
+      )}
     </div>
   );
 }
@@ -2068,523 +2529,837 @@ function IssuesTray({ st, setSt, me, replyIssue, setTaskStatus }: { st: AppState
   );
 }
 
-// ─── CRM ──────────────────────────────────────────────────────────────────────
-function CrmSection({ st, setSt, me, projects, effStage, addRevision, addFollowUp, flash, followCount, setDeal, logNote }: {
-  st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person; projects: Project[];
-  effStage: (id: string) => CrmStage; addRevision: () => void; addFollowUp: () => void; flash: (m: string) => void;
-  followCount: number; setDeal: (id: string, p: Partial<Deal>) => void;
-  logNote: (pid: string, text: string, tag: string) => boolean | void;
+// ─── Team Connection ──────────────────────────────────────────────────────────
+const QUICK_MESSAGES = ['Yes', 'No', 'Not sure', 'I have a question', 'Can you give me a call when you get a chance', 'I need some help', 'Can I Teams call you'];
+
+function convKey(a: string, b: string) { return [a, b].sort().join('~'); }
+
+function TeamConnectionView({ st, setSt, me, isManager }: {
+  st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person; isManager: boolean;
 }) {
-  if (st.crmView === 'home') return <CrmHome st={st} setSt={setSt} me={me} projects={projects} effStage={effStage} followCount={followCount} />;
-  if (st.crmView === 'followups') return <CrmFollowUps st={st} setSt={setSt} projects={projects} />;
-  if (st.crmView === 'list') return <CrmList st={st} setSt={setSt} projects={projects} effStage={effStage} />;
-  if (st.crmView === 'record') return <CrmRecord st={st} setSt={setSt} me={me} projects={projects} effStage={effStage} addRevision={addRevision} addFollowUp={addFollowUp} flash={flash} setDeal={setDeal} logNote={logNote} />;
-  return null;
-}
+  const userId = me.id;
+  const myMgr = PEOPLE.find(p => p.id === me.mgr);
+  const managers = PEOPLE.filter(p => p.kind === 'manager');
+  const myTeam = isManager ? PEOPLE.filter(p => p.mgr === userId) : [];
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-function CrmHome({ st, setSt, me, projects, effStage, followCount }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person; projects: Project[]; effStage: (id: string) => CrmStage; followCount: number; }) {
-  const sold = projects.filter(p => effStage(p.id) === 'Sold');
-  const lost = projects.filter(p => effStage(p.id) === 'Lost');
-  const feelingGood = projects.filter(p => effStage(p.id) === 'Feeling Good');
-  const totalPriced = projects.reduce((a, p) => a + num((st.deals[p.id] || {}).price || ''), 0);
-  const feelingGoodVal = feelingGood.reduce((a, p) => a + num((st.deals[p.id] || {}).price || ''), 0);
-  const soldVal = sold.reduce((a, p) => a + num((st.deals[p.id] || {}).price || ''), 0);
-  const lostVal = lost.reduce((a, p) => a + num((st.deals[p.id] || {}).price || ''), 0);
-  const avgGp = sold.length ? sold.reduce((a, p) => { const d = st.deals[p.id] || {}; const pp = num(d.price || ''), c = num(d.cost || ''); return a + (pp && c ? (pp - c) / pp : 0); }, 0) / sold.length : 0;
-  const closed = projects.filter(p => ['Sold', 'Lost'].includes(effStage(p.id)));
-  const hitRate = closed.length ? Math.round(sold.length / closed.length * 100) : 0;
-  const qGoal = 4500000; const yGoal = 18000000;
-  const qPct = Math.min(100, Math.round(soldVal / qGoal * 100));
-  const yPct = Math.min(100, Math.round(soldVal / yGoal * 100));
-  const topSold = [...sold].sort((a, b) => num((st.deals[b.id] || {}).price || '') - num((st.deals[a.id] || {}).price || ''))[0];
-  const topBid = [...projects].sort((a, b) => num((st.deals[b.id] || {}).price || '') - num((st.deals[a.id] || {}).price || ''))[0];
+  function buildRail(): Array<{ header: string; rows: Array<{ key: string; name: string; sub: string; members?: string[] }> }> {
+    const groups: Array<{ header: string; rows: Array<{ key: string; name: string; sub: string; members?: string[] }> }> = [];
+    const groupChats = [
+      { key: 'ch:all', name: 'Estimating — everyone', members: PEOPLE.map(p => p.initials) },
+      { key: 'ch:mgrs', name: 'Manager chat', members: ['RH', 'PD', myMgr?.initials || ''].filter(Boolean) },
+      ...managers.map(m => ({ key: `ch:${m.id}`, name: `${m.first}'s team`, members: [m.initials, ...PEOPLE.filter(p => p.mgr === m.id).map(p => p.initials)] })),
+    ];
+    groups.push({
+      header: 'GROUP CHATS',
+      rows: groupChats.map(g => {
+        const msgs = st.tcMessages[g.key] || [];
+        const last = msgs[msgs.length - 1];
+        return { key: g.key, name: g.name, sub: last ? last.text.slice(0, 48) : `${g.members?.length || 0} people · group chat`, members: g.members };
+      }),
+    });
+    if (!isManager && myMgr) {
+      const k = convKey(userId, myMgr.id);
+      const msgs = st.tcMessages[k] || [];
+      const last = msgs[msgs.length - 1];
+      groups.push({ header: 'YOUR MANAGER', rows: [{ key: k, name: myMgr.name, sub: last ? last.text.slice(0, 48) : myMgr.role }] });
+    }
+    managers.forEach(m => {
+      const everyone = [m, ...PEOPLE.filter(p => p.mgr === m.id)].filter(p => p.id !== userId);
+      if (!everyone.length) return;
+      groups.push({
+        header: `${m.name.toUpperCase()} · TEAM`,
+        rows: everyone.map(p => { const k = convKey(userId, p.id); const msgs = st.tcMessages[k] || []; const last = msgs[msgs.length - 1]; return { key: k, name: p.name, sub: last ? last.text.slice(0, 48) : p.role }; }),
+      });
+    });
+    const headMgmt = PEOPLE.filter(p => p.id === 'ray' || p.id === 'paul');
+    groups.push({
+      header: 'HEAD MANAGEMENT',
+      rows: headMgmt.map(p => { const k = convKey(userId, p.id); const msgs = st.tcMessages[k] || []; const last = msgs[msgs.length - 1]; return { key: k, name: p.name, sub: last ? last.text.slice(0, 48) : p.role }; }),
+    });
+    return groups;
+  }
 
-  return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-      <PageHeader kicker="1CG · SALES" title="CRM OVERVIEW" actions={<><Button variant="secondary" size="sm" onClick={() => setSt(s => ({ ...s, crmView: 'followups' }))}>FOLLOW-UPS · {followCount}</Button><Button onClick={() => setSt(s => ({ ...s, crmView: 'list' }))}>OPEN THE CRM LIST →</Button></>} />
-      <div style={{ flex: 1, overflowY: 'auto' }}>
-        <KpiStrip items={[
-          { label: 'TOTAL PRICED WORK', value: money(totalPriced), note: projects.length + ' active bids' },
-          { label: 'FEELING GOOD', value: money(feelingGoodVal), note: feelingGood.length + ' project' + (feelingGood.length !== 1 ? 's' : '') + ' in play', color: STATUS.good },
-          { label: 'SOLD', value: money(soldVal), note: sold.length + ' awarded', color: STATUS.good },
-          { label: 'LOST', value: money(lostVal), note: lost.length + ' projects elsewhere', color: 'var(--color-accent)' },
-        ]} />
-        <KpiStrip large={false} items={[
-          { label: 'AVERAGE GP %', value: Math.round(avgGp * 100) + '%', note: 'Sold projects' },
-          { label: 'HIT RATE', value: hitRate + '%', note: 'Closed bids' },
-          { label: 'PROJECTS WON', value: String(sold.length), note: 'This period', color: STATUS.good },
-          { label: 'PROJECTS LOST', value: String(lost.length), note: 'This period', color: 'var(--color-accent)' },
-        ]} />
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.5fr) minmax(0,1fr)' }}>
-          <div style={{ padding: '24px 28px', borderRight: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 18 }}>
-            <div style={{ font: '800 16px/1 var(--font-heading)' }}>SALES TO GOAL · Q3 2026</div>
-            <div style={T.micro}>% of goal</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 0, borderBottom: '1px solid var(--color-divider)' }}>
-              {[['THIS QUARTER', money(soldVal), 'var(--color-text)'], ['LAST QUARTER', '$0', 'var(--color-neutral-700)'], ['QUARTER GOAL', money(qGoal), 'var(--color-accent)']].map(([l, v, c], i) => (
-                <div key={l} style={{ padding: '12px 0', display: 'flex', flexDirection: 'column', gap: 5, borderRight: i < 2 ? '1px solid var(--color-divider)' : 'none', paddingRight: i < 2 ? 14 : 0, paddingLeft: i > 0 ? 14 : 0 }}>
-                  <div style={T.label}>{l}</div><div style={{ font: '800 22px/1 var(--font-heading)', color: c as string }}>{v}</div>
-                </div>
-              ))}
-            </div>
-            <div>
-              <div style={{ height: 14, background: 'var(--color-neutral-200)', border: '1px solid var(--color-text)', marginBottom: 6 }}><div style={{ height: '100%', background: 'var(--color-accent)', width: qPct + '%' }} /></div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ font: '600 13px/1 var(--font-body)' }}>{money(Math.max(0, qGoal - soldVal))} to go</span><span style={T.meta}>{qPct}% of goal</span></div>
-            </div>
-            <Rule strong />
-            <div style={{ font: '800 16px/1 var(--font-heading)' }}>YEAR TO DATE · 2026</div>
-            <div style={{ ...T.micro }}>% of goal</div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 0, borderBottom: '1px solid var(--color-divider)' }}>
-              {[['SOLD YTD', money(soldVal), 'var(--color-text)'], ['YEARLY GOAL', money(yGoal), 'var(--color-accent)'], ['PACE', soldVal > yGoal * 7 / 12 ? 'AHEAD' : 'BEHIND', soldVal > yGoal * 7 / 12 ? STATUS.good : 'var(--color-accent)']].map(([l, v, c], i) => (
-                <div key={l} style={{ padding: '12px 0', display: 'flex', flexDirection: 'column', gap: 5, borderRight: i < 2 ? '1px solid var(--color-divider)' : 'none', paddingRight: i < 2 ? 14 : 0, paddingLeft: i > 0 ? 14 : 0 }}>
-                  <div style={T.label}>{l}</div><div style={{ font: '800 22px/1 var(--font-heading)', color: c as string }}>{v}</div>
-                </div>
-              ))}
-            </div>
-            <div>
-              <div style={{ height: 14, background: 'var(--color-neutral-200)', border: '1px solid var(--color-text)', marginBottom: 6 }}><div style={{ height: '100%', background: 'var(--color-accent)', width: yPct + '%' }} /></div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ font: '600 13px/1 var(--font-body)' }}>{money(Math.max(0, yGoal - soldVal))} to goal</span><span style={T.meta}>{yPct}% of yearly goal</span></div>
-            </div>
-          </div>
-          <div style={{ display: 'grid', gridTemplateRows: '1fr 1fr', background: 'var(--color-neutral-100)' }}>
-            <div style={{ padding: '26px 28px', display: 'flex', flexDirection: 'column', gap: 8, borderBottom: '2px solid var(--color-text)', justifyContent: 'center' }}>
-              <div style={T.label}>TOP COMPANY SOLD TO</div>
-              <div style={{ font: '800 19px/1.15 var(--font-heading)' }}>{topSold?.client || 'Not enough history yet'}</div>
-              <div style={{ font: '800 32px/1 var(--font-heading)', color: 'var(--color-accent)', whiteSpace: 'nowrap' }}>{topSold ? money(num((st.deals[topSold.id] || {}).price || '')) : ''}</div>
-              {topSold && <div style={T.micro}>{sold.length} bid{sold.length !== 1 ? 's' : ''} sold</div>}
-            </div>
-            <div style={{ padding: '26px 28px', display: 'flex', flexDirection: 'column', gap: 8, justifyContent: 'center' }}>
-              <div style={T.label}>COMPANY WE BID THE MOST</div>
-              <div style={{ font: '800 19px/1.15 var(--font-heading)' }}>{topBid?.client || 'not enough history yet'}</div>
-              <div style={{ font: '800 32px/1 var(--font-heading)', whiteSpace: 'nowrap' }}>{topBid ? money(num((st.deals[topBid.id] || {}).price || '')) : ''}</div>
-              {topBid && <div style={T.micro}>{projects.filter(p => p.client === topBid.client).length} bids quoted last year</div>}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+  const rail = buildRail();
+  const sel = st.tcSelected;
+  const msgs = st.tcMessages[sel] || [];
 
-function CrmFollowUps({ st, setSt, projects }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; projects: Project[]; }) {
-  const today = ymd(today0());
-  const allFUs = projects.flatMap(p => (st.followUps[p.id] || []).filter(fu => st.followWho === 'All' || fu.by === st.followWho).map(fu => ({ ...fu, project: p }))).sort((a, b) => a.date.localeCompare(b.date));
-  const open = allFUs.filter(f => !f.done);
-  const byList = ['All', ...Array.from(new Set(allFUs.map(f => f.by)))];
-  return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-      <PageHeader kicker="BUSINESS DEVELOPMENT" title={'FOLLOW-UPS · ' + open.length + ' OPEN'} actions={<><div style={{ display: 'flex', border: '1px solid var(--color-text)' }}>{byList.map(b => { const on = st.followWho === b; return <button key={b} onClick={() => setSt(s => ({ ...s, followWho: b }))} style={{ padding: '8px 12px', border: 'none', background: on ? 'var(--color-text)' : 'transparent', color: on ? 'var(--color-neutral-100)' : 'var(--color-neutral-700)', font: '600 10.5px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>{b === 'All' ? 'ALL BD' : b.toUpperCase()}</button>; })}</div><Button variant="secondary" size="sm" onClick={() => setSt(s => ({ ...s, crmView: 'home' }))}>CRM OVERVIEW</Button></>} />
-      <div style={{ flex: 1, overflow: 'auto' }}>
-        {open.length === 0 && <div style={{ ...T.meta, padding: 32 }}>No open follow-ups.</div>}
-        {open.map(fu => (
-          <div key={fu.id} style={{ display: 'grid', gridTemplateColumns: '140px minmax(0,1.4fr) minmax(0,1fr) 130px', gap: 16, padding: '15px 28px', borderBottom: '1px solid var(--color-divider)', alignItems: 'center' }}>
-            <div>
-              <div style={{ font: '600 12px/1 var(--font-body)', color: fu.date < today ? 'var(--color-accent)' : 'var(--color-text)' }}>{fu.date}</div>
-              {fu.date < today && <div style={{ ...T.micro, color: 'var(--color-accent)', marginTop: 3 }}>OVERDUE</div>}
-              <div style={{ ...T.micro, marginTop: 4 }}>by {fu.by}</div>
-            </div>
-            <div><div style={{ font: '600 13px/1.2 var(--font-body)', marginBottom: 3 }}>{fu.project.short || fu.project.name}</div><div style={T.body}>{fu.note}</div></div>
-            <div>
-              <div style={{ ...T.label, marginBottom: 4 }}>GC CONTACT</div>
-              <div style={{ font: '600 13px/1.2 var(--font-body)' }}>{fu.project.client}</div>
-              <div style={{ display: 'flex', gap: 8, marginTop: 5 }}>
-                {(fu.project.gcContacts || []).slice(0, 1).map(c => (<>
-                  <a key="email" href={'mailto:' + c.email} style={{ font: '600 11px/1 var(--font-body)', letterSpacing: '.06em', color: 'var(--color-accent)', textDecoration: 'none' }}>EMAIL</a>
-                  <a key="call" href={'tel:' + c.phone} style={{ font: '600 11px/1 var(--font-body)', letterSpacing: '.06em', color: 'var(--color-accent)', textDecoration: 'none' }}>CALL</a>
-                </>))}
-              </div>
-            </div>
-            <button onClick={() => setSt(s => ({ ...s, followUps: { ...s.followUps, [fu.project.id]: (s.followUps[fu.project.id] || []).map(f => f.id === fu.id ? { ...f, done: true } : f) } }))} style={{ padding: '8px 12px', background: 'none', border: '1px solid var(--color-text)', font: '600 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>MARK DONE</button>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
+  function isUnread(key: string) {
+    const m = (st.tcMessages[key] || []);
+    const last = m[m.length - 1];
+    return last && last.from !== userId && last.at > (st.tcReadAt[key] || 0);
+  }
 
-function CrmList({ st, setSt, projects, effStage }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; projects: Project[]; effStage: (id: string) => CrmStage; }) {
-  const t0 = today0(); const soon = addDays(t0, 7);
-  const glassProj = projects.filter(p => p.trade === 'glass');
-  const acmProj = projects.filter(p => p.trade === 'acm');
-  const glassDue = glassProj.filter(p => { const d = seedShiftDate(p.bidDue); return d && d >= t0 && d <= soon; });
-  const acmDue = acmProj.filter(p => { const d = seedShiftDate(p.bidDue); return d && d >= t0 && d <= soon; });
-  const filtered = projects.filter(p =>
-    (st.crmStage === 'All' || effStage(p.id) === st.crmStage) &&
-    (st.crmBd === 'All' || (st.deals[p.id] || {}).bd === st.crmBd) &&
-    (!st.crmSearch || (p.name + p.client + p.scope + p.location).toLowerCase().includes(st.crmSearch.toLowerCase()))
-  );
-  const stageChipColor = (s: CrmStage) => ({ 'Bidding': 'var(--color-accent)', 'Feeling Good': STATUS.good, 'Neutral': 'var(--color-neutral-600)', 'At Risk': STATUS.awaiting, 'Sold': STATUS.good, 'Lost': 'var(--color-neutral-500)', 'No bid': 'var(--color-neutral-500)' } as Record<string, string>)[s] || 'var(--color-neutral-500)';
-  const ALL_STAGES = ['All', ...STAGES] as const;
+  function selectConvo(key: string) {
+    setSt(s => ({ ...s, tcSelected: key, tcReadAt: { ...s.tcReadAt, [key]: Date.now() }, tcGifPanel: false }));
+  }
+
+  function sendMessage(text: string, files: typeof st.tcPendingFiles) {
+    if (!text.trim() && !files.length) return;
+    const msg = { from: userId, text: text.trim(), at: Date.now(), attachments: files.length ? files : undefined };
+    setSt(s => ({
+      ...s,
+      tcMessages: { ...s.tcMessages, [sel]: [...(s.tcMessages[sel] || []), msg] },
+      tcCompose: '',
+      tcPendingFiles: [],
+      tcGifPanel: false,
+      tcReadAt: { ...s.tcReadAt, [sel]: Date.now() },
+    }));
+  }
+
+  function handleFileInput(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    const newFiles = files.map(f => ({ name: f.name, size: (f.size / 1024).toFixed(0) + ' KB', isImage: f.type.startsWith('image/'), url: URL.createObjectURL(f) }));
+    setSt(s => ({ ...s, tcPendingFiles: [...s.tcPendingFiles, ...newFiles] }));
+    e.target.value = '';
+  }
+
+  function handleComposePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const item = Array.from(e.clipboardData.items).find(i => i.type.startsWith('image/'));
+    if (!item) return;
+    const file = item.getAsFile(); if (!file) return;
+    e.preventDefault();
+    const url = URL.createObjectURL(file);
+    setSt(s => ({ ...s, tcPendingFiles: [...s.tcPendingFiles, { name: file.name || 'image.png', size: (file.size / 1024).toFixed(0) + ' KB', isImage: true, url }] }));
+  }
+
+  const selName = (() => {
+    for (const g of rail) for (const r of g.rows) if (r.key === sel) return { name: r.name, members: r.members, isGroup: sel.startsWith('ch:') };
+    return { name: sel, members: undefined, isGroup: false };
+  })();
+
+  const selPerson = !selName.isGroup ? PEOPLE.find(p => { const ids = sel.split('~'); return ids.includes(p.id) && p.id !== userId; }) : undefined;
+
+  function threadTag(): { label: string; accent: boolean } {
+    if (selName.isGroup) return { label: 'GROUP', accent: true };
+    if (selPerson?.id === me.mgr) return { label: 'YOUR MANAGER', accent: true };
+    if (myTeam.some(p => p.id === selPerson?.id)) return { label: 'ON YOUR TEAM', accent: false };
+    return { label: 'ESTIMATING', accent: false };
+  }
+  const tag = threadTag();
+
+  const timeStr = (at: number) => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-      <div style={{ padding: '16px 28px 12px', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 16, marginBottom: 12 }}>
-          <div>
-            <button onClick={() => setSt(s => ({ ...s, crmView: 'home' }))} style={{ background: 'none', border: 'none', font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-accent-700)', cursor: 'pointer', padding: 0, marginBottom: 6, display: 'block' }}>← ALL PROJECTS</button>
-            <div style={{ font: '800 22px/1.05 var(--font-heading)' }}>CRM LIST</div>
-          </div>
-        </div>
-        {/* KPI strip */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', borderTop: '2px solid var(--color-text)', marginBottom: 12 }}>
-          {[['ACTIVE PROJECTS · GLASS', glassProj.length, 'projects'], ['ACTIVE PROJECTS · ACM', acmProj.length, 'projects'], ['GLASS DUE THIS WEEK', glassDue.length, 'due this week'], ['ACM DUE THIS WEEK', acmDue.length, 'due this week']].map(([l, v, n], i) => (
-            <div key={l as string} style={{ padding: '10px 0', borderRight: i < 3 ? '1px solid var(--color-divider)' : 'none', paddingRight: i < 3 ? 14 : 0, paddingLeft: i > 0 ? 14 : 0 }}>
-              <div style={T.label}>{l}</div><div style={{ font: '800 26px/1 var(--font-heading)', margin: '4px 0 2px' }}>{v}</div><div style={T.micro}>{n}</div>
+    <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+      {/* rail */}
+      <div style={{ width: 290, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', overflowY: 'auto', background: 'var(--color-bg)' }}>
+        {rail.map(group => (
+          <div key={group.header}>
+            <div style={{ padding: '8px 14px 5px', font: '600 10px/1 var(--font-body)', letterSpacing: '.16em', color: 'var(--color-neutral-600)', background: 'var(--color-neutral-100)', borderBottom: '1px solid var(--color-divider)', borderTop: '2px solid var(--color-text)' }}>
+              {group.header}
             </div>
-          ))}
-        </div>
-        {/* filters */}
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          <input value={st.crmSearch} onChange={e => setSt(s => ({ ...s, crmSearch: e.target.value }))} placeholder="Search project, GC, scope or city…" style={{ ...inp, width: 240, padding: '7px 10px' }} />
-          <div style={{ display: 'flex', border: '1px solid var(--color-text)' }}>
-            {ALL_STAGES.map(s => { const on = st.crmStage === s; return <button key={s} onClick={() => setSt(ss => ({ ...ss, crmStage: s }))} style={{ padding: '8px 11px', border: 'none', background: on ? 'var(--color-text)' : 'transparent', color: on ? 'var(--color-neutral-100)' : 'var(--color-neutral-700)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', whiteSpace: 'nowrap' }}>{s === 'All' ? 'ALL' : s.length > 9 ? s.split(' ')[0].toUpperCase() : s.toUpperCase()}</button>; })}
-          </div>
-          <div style={{ display: 'flex', border: '1px solid var(--color-text)' }}>
-            {['All', ...BD_ROSTER].map(b => { const on = st.crmBd === b; return <button key={b} onClick={() => setSt(s => ({ ...s, crmBd: b }))} style={{ padding: '8px 11px', border: 'none', background: on ? 'var(--color-text)' : 'transparent', color: on ? 'var(--color-neutral-100)' : 'var(--color-neutral-700)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>{b === 'All' ? 'ALL BD' : b.toUpperCase()}</button>; })}
-          </div>
-        </div>
-      </div>
-      <div style={{ flex: 1, overflow: 'auto' }}>
-        <div style={{ ...T.micro, padding: '7px 28px', borderBottom: '1px solid var(--color-divider)', background: 'var(--color-neutral-100)' }}>{filtered.length} PROJECTS · {money(filtered.reduce((a, p) => a + num((st.deals[p.id] || {}).price || ''), 0))} TOTAL PRICED</div>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-          <thead><tr style={{ background: 'var(--color-neutral-100)' }}>
-            {['PROJECT', 'LOCATION', 'DRAW', 'LOGGED', 'BID DUE', 'ESTIMATOR', 'MANAGER', 'SELL PRICE', 'GP %', 'STAGE'].map(h => <th key={h} style={{ padding: '9px 12px', borderBottom: '2px solid var(--color-text)', textAlign: 'left', ...T.label }}>{h}</th>)}
-          </tr></thead>
-          <tbody>
-            {filtered.map(p => {
-              const d = st.deals[p.id] || {};
-              const stage = effStage(p.id);
+            {group.rows.map(row => {
+              const active = sel === row.key;
+              const unread = isUnread(row.key);
               return (
-                <tr key={p.id} onClick={() => setSt(s => ({ ...s, crmView: 'record', dealId: p.id, crmPane: 'info' }))} className="cg-row" style={{ cursor: 'pointer' }}>
-                  <td style={{ padding: '11px 12px', borderBottom: '1px solid var(--color-divider)' }}><div style={{ font: '600 13px/1.2 var(--font-body)' }}>{p.short || p.name}</div><div style={T.micro}>{p.client}</div></td>
-                  <td style={{ padding: '11px 12px', borderBottom: '1px solid var(--color-divider)', ...T.body }}>{p.location}</td>
-                  <td style={{ padding: '11px 12px', borderBottom: '1px solid var(--color-divider)' }}>{(p.drawings || d.docStage) && <Chip tone="neutral">{p.drawings || d.docStage}</Chip>}</td>
-                  <td style={{ padding: '11px 12px', borderBottom: '1px solid var(--color-divider)', ...T.body }}>{d.loggedAt || '—'}</td>
-                  <td style={{ padding: '11px 12px', borderBottom: '1px solid var(--color-divider)', ...T.body, color: (() => { const dd = seedShiftDate(p.bidDue); return dd && dd <= today0() ? 'var(--color-accent)' : 'var(--color-text)'; })() }}>{p.bidDue}</td>
-                  <td style={{ padding: '11px 12px', borderBottom: '1px solid var(--color-divider)', ...T.body }}>{personName(d.estimator || '')}</td>
-                  <td style={{ padding: '11px 12px', borderBottom: '1px solid var(--color-divider)', ...T.body }}>{personName(d.manager || '')}</td>
-                  <td style={{ padding: '11px 12px', borderBottom: '1px solid var(--color-divider)', font: '600 13px/1 var(--font-body)' }}>{d.price ? money(num(d.price)) : '—'}</td>
-                  <td style={{ padding: '11px 12px', borderBottom: '1px solid var(--color-divider)', font: '600 13px/1 var(--font-body)' }}>{gpPct(d.price || '', d.cost || '')}</td>
-                  <td style={{ padding: '11px 12px', borderBottom: '1px solid var(--color-divider)' }}><span style={{ padding: '3px 8px', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', background: 'var(--color-neutral-100)', color: stageChipColor(stage) }}>{stage.toUpperCase()}</span></td>
-                </tr>
+                <button key={row.key} onClick={() => selectConvo(row.key)} style={{ width: '100%', display: 'flex', alignItems: 'flex-start', gap: 10, padding: '9px 14px', borderBottom: '1px solid var(--color-divider)', background: active ? 'var(--color-text)' : 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left' }}>
+                  <div style={{ width: 30, height: 30, background: active ? 'var(--color-accent)' : 'var(--color-neutral-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 10px/1 var(--font-body)', flexShrink: 0, color: active ? '#fff' : 'var(--color-text)' }}>
+                    {row.key.startsWith('ch:') ? '#' : PEOPLE.find(p => { const ids = row.key.split('~'); return ids.includes(p.id) && p.id !== userId; })?.initials || '?'}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ font: '600 12px/1 var(--font-body)', color: active ? '#fff' : 'var(--color-text)', marginBottom: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.name}</div>
+                    <div style={{ font: '400 10.5px/1.3 var(--font-body)', color: active ? 'rgba(255,255,255,.65)' : 'var(--color-neutral-600)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.sub}</div>
+                    {row.members && <div style={{ font: '400 9.5px/1 var(--font-body)', color: active ? 'rgba(255,255,255,.4)' : 'var(--color-neutral-400)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.members.join(' · ')}</div>}
+                  </div>
+                  {unread && <div style={{ width: 8, height: 8, background: 'var(--color-accent)', borderRadius: '50%', flexShrink: 0, marginTop: 4 }} />}
+                </button>
               );
             })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function stageChipColor(s: CrmStage): string {
-  return ({ 'Bidding': 'var(--color-accent)', 'Feeling Good': STATUS.good, 'Neutral': 'var(--color-neutral-600)', 'At Risk': STATUS.awaiting, 'Sold': STATUS.good, 'Lost': 'var(--color-neutral-500)', 'No bid': 'var(--color-neutral-500)' } as Record<string, string>)[s] || 'var(--color-neutral-500)';
-}
-
-// ─── CRM Record ────────────────────────────────────────────────────────────────
-function CrmRecord({ st, setSt, me, projects, effStage, addRevision, addFollowUp, flash, setDeal, logNote }: {
-  st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person; projects: Project[];
-  effStage: (id: string) => CrmStage; addRevision: () => void; addFollowUp: () => void; flash: (m: string) => void;
-  setDeal: (id: string, p: Partial<Deal>) => void;
-  logNote: (pid: string, text: string, tag: string) => boolean | void;
-}) {
-  const proj = projects.find(p => p.id === st.dealId) || projects[0];
-  if (!proj) return null;
-  const deal: Deal = st.deals[proj.id] || { estimator: '', manager: '', bd: '', stage: 'Bidding', docStage: '', price: '', cost: '', loggedAt: '', assignedAt: '' };
-  const stage = effStage(proj.id);
-  const revList = st.revisions[proj.id] || [];
-  const projNotes = (st.projNotes[proj.id] || []) as Array<NoteEntry & { tag?: string; label?: string }>;
-  const [noteLogDraft, setNoteLogDraft] = useState('');
-  const [showSendModal, setShowSendModal] = useState(false);
-  const [sendTarget, setSendTarget] = useState('');
-  const projTasks = st.tasks.filter(t => t.projectId === proj.id && t.status !== 'Complete');
-  const dueDate = seedShiftDate(proj.bidDue);
-  const finalPrice = num(deal.price);
-  const finalCost = num(deal.cost);
-  const grossProfit = finalPrice && finalCost ? finalPrice - finalCost : 0;
-  const gpMargin = finalPrice && finalCost ? Math.round(grossProfit / finalPrice * 100) : 0;
-  const GP_TARGET = 25;
-
-  const PANES: Array<['info' | 'pricing' | 'followup', string]> = [['info', 'PROJECT INFO'], ['pricing', 'PRICING & REVISIONS'], ['followup', 'FOLLOW UP']];
-
-  // Notes log column (always right)
-  const NotesLog = () => (
-    <div style={{ borderLeft: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--color-divider)' }}>
-        <div style={{ font: '800 14px/1 var(--font-heading)', marginBottom: 10 }}>NOTES LOG</div>
-        <textarea value={noteLogDraft} onChange={e => setNoteLogDraft(e.target.value)} placeholder="Log a call, a scope change, a pricing decision…" style={{ ...inp, minHeight: 72, resize: 'vertical', marginBottom: 8 }} />
-        <button onClick={() => { if (logNote(proj.id, noteLogDraft, 'spec')) { setNoteLogDraft(''); flash('Note logged'); } }} style={{ padding: '8px 14px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '600 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>LOG IT</button>
-      </div>
-      <div style={{ flex: 1, overflow: 'auto', padding: '8px 18px' }}>
-        {[...projNotes].reverse().map((n, i) => (
-          <div key={i} style={{ padding: '10px 0', borderBottom: '1px solid var(--color-divider)' }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 }}>
-              <span style={{ font: '600 12px/1 var(--font-body)' }}>{n.who}</span>
-              <span style={T.micro}>{n.when}</span>
-            </div>
-            <div style={T.body}>{n.text}</div>
           </div>
         ))}
       </div>
-    </div>
-  );
 
-  return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-      {/* header */}
-      <div style={{ padding: '16px 28px 12px', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
-        <button onClick={() => setSt(s => ({ ...s, crmView: 'list' }))} style={{ background: 'none', border: 'none', font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-accent-700)', cursor: 'pointer', padding: 0, marginBottom: 8, display: 'block' }}>← ALL PROJECTS</button>
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 20 }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ ...T.micro, letterSpacing: '.14em', color: 'var(--color-accent-700)', marginBottom: 4 }}>{proj.ref} · {proj.client}</div>
-            <div style={{ font: '800 24px/1.1 var(--font-heading)', textWrap: 'pretty', maxWidth: '30ch' }}>{proj.name}</div>
-            <div style={{ ...T.meta, marginTop: 6 }}>{proj.scope} · {proj.location} · bid due <span style={{ color: dueDate && dueDate <= today0() ? 'var(--color-accent)' : 'var(--color-text)' }}>{proj.bidDue}</span></div>
+      {/* thread */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
+        {/* thread header */}
+        <div style={{ padding: '12px 20px', borderBottom: '2px solid var(--color-text)', display: 'flex', alignItems: 'center', gap: 14, flexShrink: 0, background: 'var(--color-bg)' }}>
+          <div style={{ width: 38, height: 38, background: 'var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 13px/1 var(--font-body)', color: '#fff', flexShrink: 0 }}>
+            {selName.isGroup ? '#' : selPerson?.initials || '?'}
           </div>
-          <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignItems: 'center' }}>
-            <button style={{ padding: '6px 10px', background: 'none', border: '1px solid var(--color-text)', font: '600 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>EDIT</button>
+          <div style={{ flex: 1 }}>
+            <div style={{ font: '800 18px/1 var(--font-heading)' }}>{selName.name}</div>
+            <div style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 3 }}>
+              {selName.isGroup ? `${selName.members?.length || 0} people · group chat` : selPerson ? `${selPerson.role} · ${selPerson.email}` : ''}
+            </div>
           </div>
+          <div style={{ padding: '3px 10px', background: tag.accent ? 'var(--color-accent)' : 'var(--color-neutral-300)', color: tag.accent ? '#fff' : 'var(--color-text)', font: '700 9.5px/1 var(--font-body)', letterSpacing: '.1em' }}>{tag.label}</div>
         </div>
-        <div style={{ display: 'flex', gap: 0, border: '1px solid var(--color-text)', width: 'max-content', marginTop: 14 }}>
-          {PANES.map(([p, l]) => { const on = st.crmPane === p; return <button key={p} onClick={() => setSt(s => ({ ...s, crmPane: p }))} style={{ padding: '9px 14px', border: 'none', background: on ? 'var(--color-text)' : 'transparent', color: on ? 'var(--color-neutral-100)' : 'var(--color-neutral-700)', font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>{l}</button>; })}
+
+        {/* messages */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: 12, background: 'var(--color-neutral-100)' }}>
+          {msgs.length === 0 && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--color-neutral-500)' }}>
+              <div style={{ font: '700 13px/1 var(--font-body)', letterSpacing: '.12em' }}>NO MESSAGES YET</div>
+              <div style={{ font: '400 11.5px/1.5 var(--font-body)', textAlign: 'center', maxWidth: 260 }}>Start the conversation below. Paste a screenshot or attach a file.</div>
+            </div>
+          )}
+          {msgs.map((msg, i) => {
+            const isMine = msg.from === userId;
+            const sender = PEOPLE.find(p => p.id === msg.from);
+            return (
+              <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: isMine ? 'flex-end' : 'flex-start', gap: 3 }}>
+                {msg.attachments?.map((att, ai) => (
+                  <div key={ai} style={{ maxWidth: '72%', alignSelf: isMine ? 'flex-end' : 'flex-start' }}>
+                    {att.isImage && att.url
+                      ? <img src={att.url} alt={att.name} style={{ width: 320, height: 220, objectFit: 'cover', display: 'block' }} />
+                      : <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: 'var(--color-accent)', color: '#fff', font: '600 11px/1 var(--font-body)' }}>
+                          <div style={{ width: 8, height: 8, background: '#fff', flexShrink: 0 }} />
+                          <span>{att.name}</span><span style={{ opacity: .7 }}>{att.size}</span>
+                        </div>
+                    }
+                  </div>
+                ))}
+                {msg.text && (
+                  <div style={{ maxWidth: '72%', padding: '9px 13px', background: isMine ? 'var(--color-text)' : 'var(--color-bg)', color: isMine ? '#fff' : 'var(--color-text)', border: isMine ? 'none' : '1px solid var(--color-divider)', font: '400 13px/1.5 var(--font-body)' }}>
+                    {msg.text}
+                  </div>
+                )}
+                <div style={{ font: '400 10px/1 var(--font-body)', color: 'var(--color-neutral-500)' }}>{sender?.name || msg.from} · {timeStr(msg.at)}</div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* GIF panel */}
+        {st.tcGifPanel && (
+          <div style={{ padding: '12px 16px', borderTop: '1px solid var(--color-divider)', background: 'var(--color-bg)', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
+            <div style={{ border: '1px solid var(--color-divider)', padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)' }}>ADD A GIF</div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input placeholder="Paste a GIF link" style={{ ...inputStyle, flex: 1, padding: '7px 10px' }} />
+                <button style={{ padding: '7px 14px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '600 11px/1 var(--font-body)', cursor: 'pointer' }}>ADD</button>
+              </div>
+              <div style={{ font: '400 10px/1.4 var(--font-body)', color: 'var(--color-neutral-500)' }}>Previously sent GIFs appear here for quick reuse.</div>
+            </div>
+          </div>
+        )}
+
+        {/* composer */}
+        <div style={{ borderTop: '2px solid var(--color-text)', flexShrink: 0, background: 'var(--color-bg)' }}>
+          {/* quick chips */}
+          <div style={{ padding: '10px 16px 0', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {QUICK_MESSAGES.map(q => (
+              <button key={q} onClick={() => sendMessage(q, [])} style={{ padding: '5px 10px', border: '1px solid var(--color-text)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>{q}</button>
+            ))}
+          </div>
+          {/* pending attachments */}
+          {st.tcPendingFiles.length > 0 && (
+            <div style={{ padding: '8px 16px 0', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {st.tcPendingFiles.map((f, i) => (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 8px', border: '1px solid var(--color-divider)', font: '600 10px/1 var(--font-body)' }}>
+                  {f.isImage && f.url ? <img src={f.url} alt="" style={{ width: 30, height: 30, objectFit: 'cover' }} /> : <div style={{ width: 8, height: 8, background: 'var(--color-accent)' }} />}
+                  <span>{f.name}</span>
+                  <button onClick={() => setSt(s => ({ ...s, tcPendingFiles: s.tcPendingFiles.filter((_, j) => j !== i) }))} style={{ background: 'none', border: 'none', cursor: 'pointer', font: '600 12px/1', color: 'var(--color-neutral-500)' }}>×</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* input row */}
+          <div style={{ padding: '10px 16px', display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <input type="file" ref={fileInputRef} onChange={handleFileInput} multiple style={{ display: 'none' }} />
+            <button onClick={() => fileInputRef.current?.click()} style={{ padding: '8px 12px', border: '1px solid var(--color-text)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', flexShrink: 0 }}>ATTACH</button>
+            <button onClick={() => setSt(s => ({ ...s, tcGifPanel: !s.tcGifPanel }))} style={{ padding: '8px 12px', border: '1px solid var(--color-text)', background: st.tcGifPanel ? 'var(--color-text)' : 'none', color: st.tcGifPanel ? '#fff' : 'var(--color-text)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', flexShrink: 0 }}>GIF</button>
+            <textarea
+              value={st.tcCompose}
+              onChange={e => setSt(s => ({ ...s, tcCompose: e.target.value }))}
+              onPaste={handleComposePaste}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(st.tcCompose, st.tcPendingFiles); } }}
+              placeholder="Message… paste a screenshot or Shift+Enter for newline"
+              rows={1}
+              style={{ ...inputStyle, flex: 1, resize: 'none', padding: '8px 10px', font: '400 13px/1.5 var(--font-body)' }}
+            />
+            <button onClick={() => sendMessage(st.tcCompose, st.tcPendingFiles)} style={{ padding: '8px 16px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', flexShrink: 0 }}>SEND</button>
+          </div>
+          <div style={{ padding: '0 16px 8px', font: '400 10px/1 var(--font-body)', color: 'var(--color-neutral-500)' }}>Paste a screenshot straight into the message box, or drop files with ATTACH</div>
         </div>
       </div>
+    </div>
+  );
+}
 
-      {/* body: 3 columns for info, 2 for pricing/followup */}
-      {st.crmPane === 'info' && (
-        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr 320px', minHeight: 0, overflow: 'hidden' }}>
-          {/* col 1: PROJECT */}
-          <div style={{ overflow: 'auto', padding: '20px 24px', borderRight: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div style={{ font: '800 14px/1 var(--font-heading)', marginBottom: 4 }}>PROJECT</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {[['Location', proj.location || '—'], ['Scope', proj.scope], ['General Contractor', proj.gc || proj.client], ['Drawing Stage', proj.drawings || deal.docStage || '—'], ['CRM Stage', stage]].map(([l, v]) => (
-                <div key={l} style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 8, borderBottom: '1px solid var(--color-divider)', paddingBottom: 8 }}>
-                  <span style={T.label}>{l}</span><span style={{ font: '400 13px/1.4 var(--font-body)' }}>{v}</span>
-                </div>
-              ))}
-              <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 8, borderBottom: '1px solid var(--color-divider)', paddingBottom: 8 }}>
-                <span style={T.label}>Estimator</span>
-                <select value={deal.estimator} onChange={e => setDeal(proj.id, { estimator: e.target.value })} style={{ ...inp, padding: '4px 8px', appearance: 'none' }}>
-                  {PEOPLE.filter(p => p.kind === 'estimator').map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 8, borderBottom: '1px solid var(--color-divider)', paddingBottom: 8 }}>
-                <span style={T.label}>Estimating Manager</span><span style={{ font: '400 13px/1.4 var(--font-body)' }}>{personName(deal.manager)}</span>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 8 }}>
-                <span style={T.label}>BD Rep</span>
-                <select value={deal.bd} onChange={e => setDeal(proj.id, { bd: e.target.value })} style={{ ...inp, padding: '4px 8px', appearance: 'none' }}>
-                  <option value="">— none —</option>
-                  {BD_ROSTER.map(b => <option key={b} value={b}>{b}</option>)}
-                </select>
-              </div>
+// ─── Resources ─────────────────────────────────────────────────────────────────
+const PROCESSES = [
+  { id: 'p1', kind: 'PDF' as const, title: 'Bid Submission Process', owner: 'Ray Herring', summary: 'Step-by-step guide for preparing and submitting bids on time and in the correct format.', sections: [{ heading: '1. Pre-Bid Checklist', body: 'Confirm scope, obtain addenda, and verify bid form requirements before starting takeoff.' }, { heading: '2. Takeoff', body: 'Complete full quantity survey using Bluebeam. Log all assumptions.' }, { heading: '3. Estimate Sheet', body: 'Fill in the standard estimate template. Include alternates clearly labeled.' }, { heading: '4. Review', body: 'Manager reviews before submission. Document any open items.' }, { heading: '5. Submit', body: 'Submit by the deadline. Confirm receipt with the GC.' }] },
+  { id: 'p2', kind: 'DOCX' as const, title: 'RFQ Template & Vendor Process', owner: 'Blake Nicholson', summary: 'Standard RFQ format and process for soliciting quotes from vendors and subcontractors.', sections: [{ heading: '1. Identify Vendors', body: 'Pull from the approved vendor list. Add new vendors via the vendor request form.' }, { heading: '2. Send RFQ', body: 'Use the standard RFQ template. Include drawings, specs, and scope sheet.' }, { heading: '3. Follow Up', body: 'Follow up 48 hours before quote deadline.' }, { heading: '4. Log Quotes', body: 'Enter all quotes into the estimate sheet. Note exclusions.' }] },
+  { id: 'p3', kind: 'PDF' as const, title: 'Addendum Management', owner: 'Luis Woo', summary: 'How to track, document, and respond to project addenda during the bid period.', sections: [{ heading: '1. Monitor', body: 'Check plan room daily during the bid period for new addenda.' }, { heading: '2. Log', body: 'Record each addendum in the project log with date and description.' }, { heading: '3. Revise Estimate', body: 'Update takeoff and estimate for any scope changes.' }, { heading: '4. Notify GC', body: 'Confirm receipt of all addenda with the GC before submitting.' }] },
+];
+
+const VENDORS = [
+  { id: 'v1', name: 'Oldcastle BuildingEnvelope', trade: 'Glass', about: 'National manufacturer of glass and glazing products. Primary supplier for large commercial projects.', leadTime: '8–12 wks', quoteTurnaround: '3–5 days', terms: 'Net 30', contacts: [{ name: 'Dana Pierce', role: 'Sales Rep', phone: '(404) 555-0182', email: 'dpierce@obe.com' }, { name: 'Marcus Trent', role: 'Technical Sales', phone: '(404) 555-0199', email: 'mtrent@obe.com' }] },
+  { id: 'v2', name: 'Kawneer', trade: 'Storefront & curtain wall', about: 'Aluminum framing systems for curtain wall, storefront, and windows. Strong code compliance documentation.', leadTime: '10–14 wks', quoteTurnaround: '4–7 days', terms: 'Net 30', contacts: [{ name: 'Sandra Lee', role: 'Regional Rep', phone: '(678) 555-0141', email: 'slee@kawneer.com' }] },
+  { id: 'v3', name: 'Arcadia', trade: 'Storefront & curtain wall', about: 'Architectural aluminum products including curtain wall and storefront. Competitive pricing on custom profiles.', leadTime: '6–10 wks', quoteTurnaround: '3–5 days', terms: 'Net 45', contacts: [{ name: 'James Ortega', role: 'Account Manager', phone: '(770) 555-0155', email: 'jortega@arcadia.com' }] },
+  { id: 'v4', name: 'Firestone Building Products', trade: 'Metal panels', about: 'Metal panel systems and facades. Known for warranty programs and installation support.', leadTime: '6–8 wks', quoteTurnaround: '2–4 days', terms: 'Net 30', contacts: [{ name: 'Lynn Cho', role: 'Sales', phone: '(615) 555-0177', email: 'lcho@firestone.com' }] },
+  { id: 'v5', name: 'Allegion', trade: 'Door hardware', about: 'Commercial door hardware and access control. Full product schedule takeoff available.', leadTime: '4–6 wks', quoteTurnaround: '1–3 days', terms: 'Net 30', contacts: [{ name: 'Tom Vasquez', role: 'Specification Rep', phone: '(404) 555-0133', email: 'tvasquez@allegion.com' }] },
+  { id: 'v6', name: 'Sika Corporation', trade: 'Sealants & glazing supplies', about: 'Structural and weather sealants for glazing. Full technical support for spec compliance.', leadTime: '1–2 wks', quoteTurnaround: '1–2 days', terms: 'Net 30', contacts: [{ name: 'Priya Nair', role: 'Technical Rep', phone: '(864) 555-0162', email: 'pnair@sika.com' }] },
+];
+const VENDOR_TRADES = ['All trades', 'Glass', 'Storefront & curtain wall', 'Metal panels', 'Door hardware', 'Doors & entrances', 'Sealants & glazing supplies', 'Skylights & canopies', 'Railings & handrail', 'Louvers & sunshades', 'Fabrication & finishing'];
+
+const TOOLS = [
+  { id: 't1', name: 'Bluebeam Revu', kind: 'TAKEOFF SOFTWARE', note: 'Primary takeoff and markup tool. Use for all quantity surveys, drawing markups, and bid set management.', file: 'Bluebeam_Setup_Guide.pdf', meta: 'PDF · 2.1 MB', training: ['Bluebeam'] },
+  { id: 't2', name: 'Glazier Studio', kind: 'ESTIMATING SOFTWARE', note: 'Glass and glazing estimating platform. Connects directly to bid projects and generates cost reports.', file: 'GlazierStudio_Manual.pdf', meta: 'PDF · 3.4 MB', training: ['Glazier Studio'] },
+  { id: 't3', name: 'Microsoft Excel', kind: 'WORKBOOK', note: 'Standard estimate sheet and bid tab tool. Use the 1CG Estimate Template for all bids.', file: '1CG_Estimate_Template.xlsx', meta: 'XLSX · 890 KB', training: ['Microsoft Excel'] },
+  { id: 't4', name: 'AI Estimate Assistant', kind: 'AI', note: 'AI-powered tool for extracting scope from specifications and generating first-pass estimates.', file: 'AI_Tool_Guide.pdf', meta: 'PDF · 1.2 MB', training: ['AI'] },
+];
+
+const TRAINING_VIDEOS = [
+  { id: 'tr1', type: 'Bluebeam', title: 'Bluebeam Revu: Glazing Takeoff Basics', length: '24 min', description: 'Learn the standard 1CG takeoff workflow using Bluebeam Revu. Covers markup layers, measurement tools, and quantity export.', videoUrl: '' },
+  { id: 'tr2', type: 'Bluebeam', title: 'Bluebeam: Custom Columns & Legends', length: '18 min', description: 'Set up custom columns for material types and auto-generate legends. Speeds up quantity verification significantly.', videoUrl: '' },
+  { id: 'tr3', type: 'Glazier Studio', title: 'Glazier Studio: First Bid Setup', length: '31 min', description: 'Walk through setting up a new project, entering opening schedules, and generating a first-pass estimate in Glazier Studio.', videoUrl: '' },
+  { id: 'tr4', type: 'Metal panels', title: 'Metal Panel Estimating Fundamentals', length: '22 min', description: 'Overview of metal panel systems, takeoff methodology, and common exclusions to watch for on panel scopes.', videoUrl: '' },
+  { id: 'tr5', type: 'AI', title: 'Using AI to Extract Scope from Specs', length: '15 min', description: 'How to use the 1CG AI assistant to parse specifications and flag relevant sections for glazing and metal panel scopes.', videoUrl: '' },
+  { id: 'tr6', type: 'Microsoft Excel', title: '1CG Estimate Template Walkthrough', length: '28 min', description: 'Full walkthrough of the standard estimate template, including formulas, GC tab, and formatting for submission.', videoUrl: '' },
+  { id: 'tr7', type: 'Estimating basics', title: 'Reading Commercial Construction Documents', length: '35 min', description: 'Foundation course on reading drawings, spec sections, and addenda for commercial glazing and facade scopes.', videoUrl: '' },
+  { id: 'tr8', type: 'Estimating basics', title: 'GC Relationships and Bid Strategy', length: '20 min', description: 'How to work with general contractors, understand bid invitations, and position 1CG competitively.', videoUrl: '' },
+];
+const TRAINING_FILTERS = ['All training', 'Bluebeam', 'Glazier Studio', 'Metal panels', 'AI', 'Microsoft Excel', 'Estimating basics'];
+
+function ResourcesView({ st, setSt }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person }) {
+  const cat = st.resCategory;
+  const search = st.resSearch.toLowerCase();
+
+  const CATEGORIES: Array<{ key: typeof cat; label: string; count: number }> = [
+    { key: 'processes', label: 'Processes', count: PROCESSES.length },
+    { key: 'vendors', label: 'Vendor contacts', count: VENDORS.length },
+    { key: 'tools', label: 'Tools', count: TOOLS.length },
+    { key: 'training', label: 'Training', count: TRAINING_VIDEOS.length },
+  ];
+
+  const catHints: Record<typeof cat, string> = {
+    processes: 'Standard operating procedures for the estimating team.',
+    vendors: 'Approved suppliers and vendor contacts by trade.',
+    tools: 'Software and workbooks used for estimating and takeoff.',
+    training: 'Video guides for tools and estimating fundamentals.',
+  };
+
+  return (
+    <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+      {/* category rail */}
+      <div style={{ width: 230, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', background: 'var(--color-bg)' }}>
+        <div style={{ padding: '12px 16px', borderBottom: '2px solid var(--color-text)', font: '700 11px/1 var(--font-body)', letterSpacing: '.16em' }}>RESOURCE LIBRARY</div>
+        {CATEGORIES.map(c => (
+          <button key={c.key} onClick={() => setSt(s => ({ ...s, resCategory: c.key, resSearch: '', resSelectedVendor: null, resProcessReader: null }))} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', border: 'none', borderBottom: '1px solid var(--color-divider)', background: cat === c.key ? 'var(--color-text)' : 'transparent', color: cat === c.key ? '#fff' : 'var(--color-text)', font: '600 12.5px/1 var(--font-body)', textAlign: 'left', cursor: 'pointer' }}>
+            <span>{c.label}</span>
+            <span style={{ font: '600 11px/1 var(--font-body)', opacity: .6 }}>{c.count}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* content panel */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
+        {/* panel header */}
+        {!st.resProcessReader && (
+          <div style={{ padding: '16px 24px', borderBottom: '2px solid var(--color-text)', display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0, background: 'var(--color-bg)' }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ font: '800 18px/1 var(--font-heading)' }}>{CATEGORIES.find(c => c.key === cat)?.label}</div>
+              <div style={{ font: '400 11.5px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 4 }}>{catHints[cat]}</div>
             </div>
-            <button onClick={() => { setSendTarget(deal.estimator || ''); setShowSendModal(true); }} style={{ padding: '10px 14px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '600 12px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', textAlign: 'left', marginTop: 8 }}>SEND TO ESTIMATOR'S QUEUE</button>
+            <input value={st.resSearch} onChange={e => setSt(s => ({ ...s, resSearch: e.target.value, resSelectedVendor: null }))} placeholder={cat === 'processes' ? 'Search processes' : cat === 'vendors' ? 'Search vendors' : cat === 'tools' ? 'Search tools' : 'Search training'} style={{ ...inputStyle, width: 220, padding: '8px 12px' }} />
+            <button onClick={() => setSt(s => ({ ...s, resAddingResource: true }))} style={{ padding: '9px 16px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', flexShrink: 0 }}>+ ADD RESOURCE</button>
           </div>
-          {/* col 2: DATES + GC + TASKS */}
-          <div style={{ overflow: 'auto', padding: '20px 24px', borderRight: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 18 }}>
-            <div>
-              <div style={{ font: '800 13px/1 var(--font-heading)', marginBottom: 12 }}>DATES</div>
-              {[['Logged In', deal.loggedAt || '—'], ['Assigned', deal.assignedAt || '—'], ['Last Price Logged', deal.lastPricedAt || '—'], ['Bid Due', proj.bidDue]].map(([l, v]) => (
-                <div key={l} style={{ display: 'grid', gridTemplateColumns: '130px 1fr', gap: 8, borderBottom: '1px solid var(--color-divider)', paddingBottom: 8, marginBottom: 8 }}>
-                  <span style={T.label}>{l}</span><span style={{ font: '400 13px/1.3 var(--font-body)', color: l === 'Bid Due' && dueDate && dueDate <= today0() ? 'var(--color-accent)' : 'var(--color-text)' }}>{v}</span>
+        )}
+
+        {/* PROCESSES */}
+        {cat === 'processes' && !st.resProcessReader && (
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+            {[...PROCESSES, ...(st.userProcesses || [])].filter(p => !search || p.title.toLowerCase().includes(search) || p.owner.toLowerCase().includes(search)).map((proc, i, arr) => (
+              <ProcessRow key={proc.id} proc={proc as typeof PROCESSES[0]} isLast={i === arr.length - 1} onRead={() => setSt(s => ({ ...s, resProcessReader: proc.id }))} />
+            ))}
+          </div>
+        )}
+
+        {/* PROCESS READER */}
+        {cat === 'processes' && st.resProcessReader && (() => {
+          const proc = [...PROCESSES, ...(st.userProcesses || [])].find(p => p.id === st.resProcessReader) as typeof PROCESSES[0] | undefined;
+          if (!proc) return null;
+          return (
+            <div style={{ flex: 1, overflowY: 'auto', padding: '24px 40px', maxWidth: 900 }}>
+              <button onClick={() => setSt(s => ({ ...s, resProcessReader: null }))} style={{ background: 'none', border: 'none', font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer', color: 'var(--color-accent)', marginBottom: 16, padding: 0 }}>← ALL PROCESSES</button>
+              <div style={{ font: '500 10.5px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)', marginBottom: 8 }}>{proc.kind} · OWNER: {proc.owner.toUpperCase()}</div>
+              <div style={{ font: '800 28px/1.2 var(--font-heading)', marginBottom: 12 }}>{proc.title}</div>
+              <div style={{ font: '400 13.5px/1.6 var(--font-body)', color: 'var(--color-neutral-700)', marginBottom: 20 }}>{proc.summary}</div>
+              <div style={{ height: 2, background: 'var(--color-text)', marginBottom: 20 }} />
+              {proc.sections.map((sec, i) => (
+                <div key={i} style={{ marginBottom: 20 }}>
+                  <div style={{ font: '700 14px/1 var(--font-body)', marginBottom: 8 }}>{sec.heading}</div>
+                  <div style={{ font: '400 13px/1.6 var(--font-body)', color: 'var(--color-neutral-700)' }}>{sec.body}</div>
                 </div>
               ))}
-            </div>
-            {(proj.gcContacts || []).length > 0 && (
-              <div>
-                <div style={{ font: '800 13px/1 var(--font-heading)', marginBottom: 10 }}>GC CONTACT</div>
-                {(proj.gcContacts || []).map((c, i) => (
-                  <div key={i} style={{ marginBottom: 12, paddingBottom: 10, borderBottom: '1px solid var(--color-divider)' }}>
-                    <div style={{ font: '600 13px/1.2 var(--font-body)' }}>{c.name} <span style={T.micro}>{c.title}</span></div>
-                    <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
-                      <a href={'mailto:' + c.email} style={{ ...T.micro, color: 'var(--color-accent-700)' }}>{c.email}</a>
-                      <span style={T.micro}>·</span>
-                      <a href={'tel:' + c.phone} style={{ ...T.micro, color: 'var(--color-accent-700)' }}>{c.phone}</a>
-                    </div>
-                  </div>
-                ))}
+              <div style={{ marginTop: 32, paddingTop: 16, borderTop: '1px solid var(--color-divider)' }}>
+                <button style={{ padding: '10px 20px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>↓ DOWNLOAD</button>
               </div>
-            )}
-            {projTasks.length > 0 && (
-              <div>
-                <div style={{ font: '800 13px/1 var(--font-heading)', marginBottom: 10 }}>OPEN TASKS</div>
-                {projTasks.map(t => (
-                  <button key={t.id} onClick={() => setSt(s => ({ ...s, app: 'tracker', view: 'projects', openTaskId: t.id }))} style={{ width: '100%', textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--color-divider)', background: 'none', border: 'none', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--color-divider)', cursor: 'pointer' }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
-                      <span style={{ font: '600 12.5px/1.25 var(--font-body)' }}>{t.title}</span>
-                      <span style={T.micro}>{personFirst(t.who)} · {t.due}</span>
-                    </div>
-                    <span style={{ padding: '3px 8px', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', color: statusColor(t.status), background: 'var(--color-neutral-200)', flexShrink: 0 }}>{statusShort(t.status)}</span>
+            </div>
+          );
+        })()}
+
+        {/* VENDORS */}
+        {cat === 'vendors' && (
+          <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+            <div style={{ width: 300, flexShrink: 0, borderRight: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--color-divider)', flexShrink: 0 }}>
+                <select value={st.resVendorTrade} onChange={e => setSt(s => ({ ...s, resVendorTrade: e.target.value, resSelectedVendor: null }))} style={{ ...inputStyle, width: '100%', padding: '7px 10px', appearance: 'none' }}>
+                  {[...VENDOR_TRADES, ...(st.customVendorTrades || [])].map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+              <div style={{ flex: 1, overflowY: 'auto' }}>
+                {[...VENDORS, ...(st.userVendors || [])].filter(v => {
+                  if (st.resVendorTrade !== 'All trades' && v.trade !== st.resVendorTrade) return false;
+                  if (search && !v.name.toLowerCase().includes(search) && !v.trade.toLowerCase().includes(search) && !v.about.toLowerCase().includes(search) && !v.contacts.some(c => c.name.toLowerCase().includes(search) || c.email.toLowerCase().includes(search))) return false;
+                  return true;
+                }).map(v => (
+                  <button key={v.id} onClick={() => setSt(s => ({ ...s, resSelectedVendor: v.id }))} style={{ width: '100%', padding: '12px 14px', border: 'none', borderBottom: '1px solid var(--color-divider)', background: st.resSelectedVendor === v.id ? 'var(--color-text)' : 'transparent', color: st.resSelectedVendor === v.id ? '#fff' : 'var(--color-text)', textAlign: 'left', cursor: 'pointer' }}>
+                    <div style={{ font: '600 12.5px/1 var(--font-body)' }}>{v.name}</div>
+                    <div style={{ font: '400 10.5px/1 var(--font-body)', opacity: .65, marginTop: 4 }}>{v.trade} · {v.contacts.length} contact{v.contacts.length !== 1 ? 's' : ''}</div>
                   </button>
                 ))}
               </div>
-            )}
-          </div>
-          {/* col 3: Notes Log */}
-          <NotesLog />
-        </div>
-      )}
-
-      {st.crmPane === 'pricing' && (
-        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0,2fr) 320px', minHeight: 0, overflow: 'hidden' }}>
-          <div style={{ overflow: 'auto', padding: '20px 28px', display: 'flex', flexDirection: 'column', gap: 20, borderRight: '1px solid var(--color-divider)' }}>
-            {/* final pricing */}
-            <div>
-              <div style={{ font: '800 14px/1 var(--font-heading)', marginBottom: 14 }}>FINAL PRICING</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 10 }}>
-                <div><div style={T.label}>SELL PRICE</div><div style={{ font: '800 28px/1 var(--font-heading)', marginTop: 6 }}>{finalPrice ? money(finalPrice) : '—'}</div></div>
-                <div><div style={T.label}>COST</div><div style={{ font: '800 28px/1 var(--font-heading)', marginTop: 6 }}>{finalCost ? money(finalCost) : '—'}</div></div>
-                <div><div style={T.label}>GROSS PROFIT</div><div style={{ font: '800 28px/1 var(--font-heading)', marginTop: 6 }}>{grossProfit ? money(grossProfit) : '—'}</div></div>
-                <div><div style={T.label}>GP MARGIN</div><div style={{ font: '800 28px/1 var(--font-heading)', marginTop: 6, color: gpMargin < GP_TARGET ? 'var(--color-accent)' : STATUS.good }}>{gpMargin ? gpMargin + '%' : '—'}</div></div>
-              </div>
-              {finalPrice > 0 && <div style={{ ...T.micro, color: gpMargin >= GP_TARGET ? STATUS.good : 'var(--color-accent)' }}>All {gpMargin >= GP_TARGET ? 'at or above' : 'below'} this {GP_TARGET}% target margin.</div>}
             </div>
-            <Rule strong />
-            {/* log revision */}
-            <div>
-              <div style={{ font: '800 14px/1 var(--font-heading)', marginBottom: 12 }}>LOG A REVISION</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
-                <Field label="REASON"><input value={st.revDraft.label} onChange={e => setSt(s => ({ ...s, revDraft: { ...s.revDraft, label: e.target.value } }))} placeholder="e.g. Addendum 3" style={inp} /></Field>
-                <Field label="SELL PRICE"><input value={st.revDraft.price} onChange={e => setSt(s => ({ ...s, revDraft: { ...s.revDraft, price: e.target.value } }))} placeholder="0" style={inp} /></Field>
-                <Field label="COST — REQUIRED FOR GP"><input value={st.revDraft.cost} onChange={e => setSt(s => ({ ...s, revDraft: { ...s.revDraft, cost: e.target.value } }))} placeholder="0" style={inp} /></Field>
-                <Field label="NOTE"><input value={st.revDraft.note} onChange={e => setSt(s => ({ ...s, revDraft: { ...s.revDraft, note: e.target.value } }))} placeholder="What changed?" style={inp} /></Field>
-              </div>
-              <button onClick={addRevision} style={{ padding: '11px 16px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '600 12px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer' }}>LOG REVISION R{revList.length}</button>
-            </div>
-            <Rule />
-            {/* revision history */}
-            <div>
-              <div style={{ font: '800 14px/1 var(--font-heading)', marginBottom: 10 }}>REVISION HISTORY <span style={T.micro}>{revList.length} revision{revList.length !== 1 ? 's' : ''}</span></div>
-              {revList.length === 0 ? <div style={T.meta}>No revisions logged yet.</div> : (
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                  <thead><tr>{['REV', 'REASON', 'SELL PRICE', 'COST', 'GP %', 'LOGGED'].map(h => <th key={h} style={{ padding: '7px 10px', borderBottom: '1px solid var(--color-text)', textAlign: 'left', ...T.label }}>{h}</th>)}</tr></thead>
-                  <tbody>
-                    {revList.map(r => (
-                      <tr key={r.rev}>
-                        <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--color-divider)', font: '700 13px/1 var(--font-body)' }}>{r.rev}</td>
-                        <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--color-divider)', ...T.body }}>{r.label}</td>
-                        <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--color-divider)', font: '600 13px/1 var(--font-body)' }}>{money(num(r.price))}</td>
-                        <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--color-divider)', font: '600 13px/1 var(--font-body)' }}>{money(num(r.cost))}</td>
-                        <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--color-divider)', font: '600 13px/1 var(--font-body)' }}>{gpPct(r.price, r.cost)}</td>
-                        <td style={{ padding: '9px 10px', borderBottom: '1px solid var(--color-divider)', ...T.micro }}>{r.when}<br />{r.who}</td>
-                      </tr>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '24px' }}>
+              {(() => {
+                const v = [...VENDORS, ...(st.userVendors || [])].find(v => v.id === st.resSelectedVendor);
+                if (!v) return <div style={{ font: '500 12px/1 var(--font-body)', color: 'var(--color-neutral-500)', padding: 8 }}>Select a company on the left.</div>;
+                return (
+                  <>
+                    <div style={{ font: '800 22px/1.2 var(--font-heading)', marginBottom: 4 }}>{v.name}</div>
+                    <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-accent)', textTransform: 'uppercase', marginBottom: 14 }}>{v.trade}</div>
+                    <div style={{ font: '400 13px/1.6 var(--font-body)', color: 'var(--color-neutral-700)', marginBottom: 16 }}>{v.about}</div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderTop: '1px solid var(--color-divider)', borderBottom: '1px solid var(--color-divider)', marginBottom: 20 }}>
+                      {[['LEAD TIME', v.leadTime], ['QUOTE TURNAROUND', v.quoteTurnaround]].map(([l, val]) => (
+                        <div key={l} style={{ padding: '12px 14px', borderLeft: l !== 'LEAD TIME' ? '1px solid var(--color-divider)' : 'none' }}>
+                          <div style={{ font: '500 9.5px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)', marginBottom: 6 }}>{l}</div>
+                          <div style={{ font: '700 13px/1 var(--font-body)' }}>{val}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.12em', marginBottom: 10 }}>CONTACTS</div>
+                    {v.contacts.map((c, i) => (
+                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--color-divider)' }}>
+                        <div style={{ width: 34, height: 34, background: 'var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 11px/1 var(--font-body)', color: '#fff', flexShrink: 0 }}>{c.name.split(' ').map(w => w[0]).join('')}</div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ font: '600 13px/1 var(--font-body)' }}>{c.name}</div>
+                          <div style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 3 }}>{c.role}</div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ font: '400 11.5px/1 var(--font-body)' }}>{c.phone}</div>
+                          <a href={'mailto:' + c.email} style={{ font: '600 11px/1 var(--font-body)', color: 'var(--color-accent)', display: 'block', marginTop: 3 }}>{c.email}</a>
+                        </div>
+                      </div>
                     ))}
-                  </tbody>
-                </table>
-              )}
+                  </>
+                );
+              })()}
             </div>
-            <Rule />
-            {/* proposal upload */}
-            <div>
-              <div style={{ font: '800 14px/1 var(--font-heading)', marginBottom: 4 }}>PROPOSAL — UPLOAD AND AUTOFILL</div>
-              <Rule />
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 14 }}>
-                <div>
-                  <div style={{ ...T.label, marginBottom: 8 }}>UPLOAD THE PROPOSAL</div>
-                  <input type="file" accept=".pdf" onChange={() => flash('PDF read — paste the scope text below to autofill')} style={{ display: 'block', marginBottom: 8 }} />
-                  <div style={{ border: '2px dashed var(--color-divider)', padding: '24px 16px', textAlign: 'center', ...T.meta }}>
-                    Text-based files are read directly. For a PDF, paste the scope text below — the reader cannot crack a scanned image.
+          </div>
+        )}
+
+        {/* TOOLS */}
+        {cat === 'tools' && (
+          <div style={{ flex: 1, overflowY: 'auto' }}>
+            {[...TOOLS, ...(st.userTools || [])].filter(t => !search || t.name.toLowerCase().includes(search) || t.note.toLowerCase().includes(search)).map((tool, i) => (
+              <div key={tool.id} style={{ padding: '16px 24px', borderBottom: '1px solid var(--color-divider)', display: 'flex', gap: 20, alignItems: 'flex-start' }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 5 }}>
+                    <div style={{ width: 8, height: 8, background: 'var(--color-accent)', flexShrink: 0, marginTop: 4 }} />
+                    <div style={{ font: '700 14px/1 var(--font-body)' }}>{tool.name}</div>
+                    <div style={{ font: '600 9.5px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)' }}>{tool.kind}</div>
+                  </div>
+                  <div style={{ font: '400 12.5px/1.5 var(--font-body)', color: 'var(--color-neutral-700)', marginLeft: 18, marginBottom: 8 }}>{tool.note}</div>
+                  <div style={{ marginLeft: 18, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {tool.training.map(type => (
+                      <button key={type} onClick={() => setSt(s => ({ ...s, resCategory: 'training', resTrainingFilter: type, resSearch: '' }))} style={{ padding: '4px 10px', border: '1px solid var(--color-accent)', background: 'none', color: 'var(--color-accent)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>▶ {type.toUpperCase()} TRAINING</button>
+                    ))}
                   </div>
                 </div>
-                <div>
-                  <div style={{ ...T.label, marginBottom: 8 }}>LOGGED FROM THE PROPOSAL <span style={{ ...T.micro, marginLeft: 6 }}>nothing read yet</span></div>
-                  <div style={{ ...T.meta, marginBottom: 6 }}>STATUS</div>
-                  <div style={{ ...T.body, color: 'var(--color-neutral-600)' }}>Upload or paste the proposal, then hit READ THE PROPOSAL — the scope, inclusions, exclusions, alternates and any price found get logged here and into the revision draft.</div>
+                <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                  <button style={{ padding: '9px 16px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', display: 'block', marginBottom: 6 }}>↓ DOWNLOAD</button>
+                  <div style={{ font: '400 10px/1 var(--font-body)', color: 'var(--color-neutral-500)' }}>{tool.meta}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* TRAINING */}
+        {cat === 'training' && (() => {
+          const allTypes = [...new Set([...TRAINING_FILTERS.slice(1), ...(st.customTrainingTypes || [])])];
+          const allFilters = ['All training', ...allTypes];
+          const allVideos = [...TRAINING_VIDEOS, ...(st.userTrainingVideos || [])];
+          return (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+              <div style={{ padding: '10px 24px', borderBottom: '1px solid var(--color-divider)', display: 'flex', gap: 6, flexWrap: 'wrap', flexShrink: 0, background: 'var(--color-bg)' }}>
+                {allFilters.map(f => (
+                  <button key={f} onClick={() => setSt(s => ({ ...s, resTrainingFilter: f }))} style={{ padding: '5px 12px', border: st.resTrainingFilter === f ? 'none' : '1px solid var(--color-divider)', background: st.resTrainingFilter === f ? 'var(--color-accent)' : 'transparent', color: st.resTrainingFilter === f ? '#fff' : 'var(--color-neutral-600)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>{f.toUpperCase()}</button>
+                ))}
+              </div>
+              <div style={{ flex: 1, overflowY: 'auto', padding: '24px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 16 }}>
+                  {allVideos.filter(v => {
+                    if (st.resTrainingFilter !== 'All training' && v.type !== st.resTrainingFilter) return false;
+                    if (search && !v.title.toLowerCase().includes(search) && !v.description.toLowerCase().includes(search)) return false;
+                    return true;
+                  }).map(video => (
+                    <button key={video.id} onClick={() => setSt(s => ({ ...s, resVideoOpen: video.id }))} style={{ background: 'var(--color-bg)', border: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', cursor: 'pointer', textAlign: 'left', padding: 0 }}>
+                      <div style={{ height: 140, background: 'var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', width: '100%' }}>
+                        <div style={{ width: 44, height: 44, border: '2px solid rgba(255,255,255,.25)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <div style={{ font: '400 18px/1', color: 'rgba(255,255,255,.8)', marginLeft: 2 }}>▶</div>
+                        </div>
+                        <div style={{ position: 'absolute', bottom: 10, right: 10, padding: '3px 7px', background: 'rgba(0,0,0,.55)', color: '#fff', font: '600 10px/1 var(--font-body)', letterSpacing: '.04em' }}>{video.length}</div>
+                      </div>
+                      <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 5, flex: 1 }}>
+                        <div style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-accent)', textTransform: 'uppercase' }}>{video.type}</div>
+                        <div style={{ font: '700 13px/1.3 var(--font-body)', color: 'var(--color-text)' }}>{video.title}</div>
+                        <div style={{ font: '400 11.5px/1.5 var(--font-body)', color: 'var(--color-neutral-600)' }}>{video.description}</div>
+                        <div style={{ marginTop: 8, padding: '7px 12px', background: 'var(--color-text)', color: '#fff', font: '700 10px/1 var(--font-body)', letterSpacing: '.1em', alignSelf: 'flex-start' }}>▶ WATCH</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* Video viewer modal */}
+      {st.resVideoOpen && (() => {
+        const allVideos = [...TRAINING_VIDEOS, ...(st.userTrainingVideos || [])];
+        const video = allVideos.find(v => v.id === st.resVideoOpen);
+        if (!video) return null;
+        const filtered = allVideos.filter(v => st.resTrainingFilter === 'All training' || v.type === st.resTrainingFilter);
+        const idx = filtered.findIndex(v => v.id === st.resVideoOpen);
+        const prev = filtered[idx - 1];
+        const next = filtered[idx + 1];
+        return (
+          <div onClick={() => setSt(s => ({ ...s, resVideoOpen: null }))} style={{ position: 'fixed', inset: 0, background: 'rgba(20,18,18,.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: 32 }}>
+            <div onClick={e => e.stopPropagation()} style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: '100%', maxWidth: 860, maxHeight: '90vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+              {/* modal header */}
+              <div style={{ padding: '14px 20px', borderBottom: '2px solid var(--color-text)', display: 'flex', alignItems: 'center', gap: 14, flexShrink: 0 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-accent)', textTransform: 'uppercase', marginBottom: 5 }}>{video.type}</div>
+                  <div style={{ font: '800 17px/1.2 var(--font-heading)' }}>{video.title}</div>
+                </div>
+                <button onClick={() => window.open(video.videoUrl || '#', '_blank')} style={{ padding: '8px 14px', border: '1px solid var(--color-text)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer', flexShrink: 0 }}>OPEN IN TAB ↗</button>
+                <button onClick={() => setSt(s => ({ ...s, resVideoOpen: null }))} style={{ padding: '8px 12px', border: '1px solid var(--color-divider)', background: 'none', font: '600 11px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>✕</button>
+              </div>
+              {/* video area */}
+              <div style={{ background: '#0e0d0d', aspectRatio: '16/9', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, position: 'relative' }}>
+                {video.videoUrl
+                  ? <iframe src={video.videoUrl} style={{ width: '100%', height: '100%', border: 'none', position: 'absolute', inset: 0 }} allowFullScreen title={video.title} />
+                  : (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
+                      <div style={{ width: 64, height: 64, border: '2px solid rgba(255,255,255,.2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <div style={{ font: '300 28px/1', color: 'rgba(255,255,255,.5)', marginLeft: 4 }}>▶</div>
+                      </div>
+                      <div style={{ font: '500 11px/1 var(--font-body)', letterSpacing: '.12em', color: 'rgba(255,255,255,.3)' }}>{video.length}</div>
+                    </div>
+                  )
+                }
+              </div>
+              {/* meta + nav */}
+              <div style={{ padding: '16px 20px', borderTop: '1px solid var(--color-divider)', display: 'flex', alignItems: 'flex-start', gap: 20, flexShrink: 0 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ font: '400 12.5px/1.6 var(--font-body)', color: 'var(--color-neutral-700)' }}>{video.description}</div>
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignItems: 'center' }}>
+                  <button onClick={() => prev && setSt(s => ({ ...s, resVideoOpen: prev.id }))} disabled={!prev} style={{ padding: '8px 14px', border: '1px solid var(--color-text)', background: 'none', font: '700 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: prev ? 'pointer' : 'default', opacity: prev ? 1 : .3 }}>← PREV</button>
+                  <span style={{ font: '500 10px/1 var(--font-body)', color: 'var(--color-neutral-500)' }}>{idx + 1} / {filtered.length}</span>
+                  <button onClick={() => next && setSt(s => ({ ...s, resVideoOpen: next.id }))} disabled={!next} style={{ padding: '8px 14px', border: '1px solid var(--color-text)', background: 'none', font: '700 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: next ? 'pointer' : 'default', opacity: next ? 1 : .3 }}>NEXT →</button>
                 </div>
               </div>
             </div>
           </div>
-          <NotesLog />
-        </div>
-      )}
+        );
+      })()}
 
-      {st.crmPane === 'followup' && (
-        <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0,2fr) 320px', minHeight: 0, overflow: 'hidden' }}>
-          <div style={{ overflow: 'auto', padding: '20px 28px', display: 'flex', flexDirection: 'column', gap: 16, borderRight: '1px solid var(--color-divider)' }}>
-            <div style={{ font: '800 14px/1 var(--font-heading)' }}>FOLLOW-UP</div>
-            <Field label="FOLLOW-UP DATE"><input type="date" value={st.followDate} onChange={e => setSt(s => ({ ...s, followDate: e.target.value }))} style={inp} /></Field>
-            <Field label="WHAT TO CHASE"><textarea value={st.followNote} onChange={e => setSt(s => ({ ...s, followNote: e.target.value }))} placeholder="What needs following up?" style={{ ...inp, minHeight: 70, resize: 'vertical' }} /></Field>
-            <Button onClick={addFollowUp} style={{ width: 'max-content' }}>SET FOLLOW-UP</Button>
-            {(st.followUps[proj.id] || []).length > 0 && (
-              <div style={{ marginTop: 8 }}>
-                <div style={{ ...T.label, marginBottom: 10 }}>HISTORY</div>
-                {(st.followUps[proj.id] || []).map(fu => (
-                  <div key={fu.id} style={{ padding: '10px 0', borderBottom: '1px solid var(--color-divider)', display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ font: '600 12px/1 var(--font-body)', textDecoration: fu.done ? 'line-through' : 'none', color: fu.done ? 'var(--color-neutral-500)' : 'var(--color-text)' }}>{fu.date}</div>
-                      <div style={{ ...T.body, color: fu.done ? 'var(--color-neutral-500)' : 'var(--color-text)', marginTop: 3 }}>{fu.note}</div>
-                    </div>
-                    {fu.done ? <span style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', color: STATUS.good }}>DONE</span>
-                      : <button onClick={() => setSt(s => ({ ...s, followUps: { ...s.followUps, [proj.id]: (s.followUps[proj.id] || []).map(f => f.id === fu.id ? { ...f, done: true } : f) } }))} style={{ padding: '5px 8px', background: 'none', border: '1px solid var(--color-divider)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>DONE</button>}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          <NotesLog />
-        </div>
-      )}
+      {/* Add Resource modal */}
+      {st.resAddingResource && <AddResourceModal st={st} setSt={setSt} />}
+    </div>
+  );
+}
 
-      {/* ── Send to Estimator modal ── */}
-      {showSendModal && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.5)', display: 'grid', placeItems: 'center', zIndex: 90 }}>
-          <div style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 460, maxWidth: '92vw', boxShadow: 'var(--shadow-lg)' }}>
-            <div style={{ padding: '16px 20px', borderBottom: '2px solid var(--color-text)', font: '800 16px/1 var(--font-heading)' }}>SEND TO ESTIMATOR</div>
-            <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-              <div style={{ ...T.body }}>Select an estimator to assign <strong>{proj.short || proj.name}</strong> to their task tracker.</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {PEOPLE.filter(p => p.kind === 'estimator').map(p => (
-                  <button
-                    key={p.id}
-                    onClick={() => setSendTarget(p.id)}
-                    style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', border: '2px solid ' + (sendTarget === p.id ? 'var(--color-text)' : 'var(--color-divider)'), background: sendTarget === p.id ? 'var(--color-text)' : 'transparent', color: sendTarget === p.id ? '#fff' : 'var(--color-text)', cursor: 'pointer', textAlign: 'left' }}
-                  >
-                    <div style={{ width: 32, height: 32, background: sendTarget === p.id ? 'var(--color-accent)' : 'var(--color-neutral-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 11px/1 var(--font-body)', flexShrink: 0, color: sendTarget === p.id ? '#fff' : 'var(--color-text)' }}>{p.initials}</div>
-                    <div>
-                      <div style={{ font: '700 13px/1 var(--font-heading)' }}>{p.name}</div>
-                      <div style={{ font: '500 11px/1 var(--font-body)', opacity: .7, marginTop: 3 }}>{p.role}</div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-              <div style={{ display: 'flex', gap: 10, paddingTop: 4 }}>
-                <Button
-                  onClick={() => {
-                    if (!sendTarget) { flash('Select an estimator first'); return; }
-                    const target = PEOPLE.find(p => p.id === sendTarget)!;
-                    const wk = mondayOf(today0());
-                    const dt = addDays(wk, 0); dt.setHours(0, 0, 0, 0);
-                    const nt: Task = {
-                      id: 'crm' + Date.now(),
-                      title: 'Price ' + (proj.short || proj.name),
-                      projectId: proj.id,
-                      who: sendTarget,
-                      status: 'To-Do',
-                      due: prettyShort(dt),
-                      day: 'Mon',
-                      date: ymd(dt),
-                      hrs: 4,
-                      detail: 'Sent from CRM by ' + me.name + ' · bid due ' + proj.bidDue,
-                      notes: [],
-                    };
-                    setSt(s => ({
-                      ...s,
-                      tasks: [...s.tasks, nt],
-                      app: 'tracker',
-                      view: 'projects',
-                      projectId: proj.id,
-                    }));
-                    setDeal(proj.id, { estimator: sendTarget, assignedAt: new Date().toLocaleDateString([], { month: 'short', day: '2-digit' }) });
-                    setShowSendModal(false);
-                    flash('Sent to ' + target.first + ' — task added to their tracker');
-                  }}
-                >
-                  SEND TO TRACKER
-                </Button>
-                <Button variant="secondary" onClick={() => setShowSendModal(false)}>CANCEL</Button>
-              </div>
-            </div>
+function UploadZone({ label, accept, file, url, onFile, onUrl, urlPlaceholder }: {
+  label: string; accept: string; file: File | null; url: string;
+  onFile: (f: File, objectUrl: string) => void; onUrl: (u: string) => void; urlPlaceholder: string;
+}) {
+  const [mode, setMode] = useState<'link' | 'file'>('link');
+  const ref = useRef<HTMLInputElement>(null);
+  return (
+    <div>
+      <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', marginBottom: 8 }}>{label}</div>
+      <div style={{ display: 'flex', marginBottom: 10, border: '1px solid var(--color-text)' }}>
+        <button onClick={() => setMode('link')} style={{ flex: 1, padding: '8px', border: 'none', background: mode === 'link' ? 'var(--color-text)' : 'transparent', color: mode === 'link' ? '#fff' : 'var(--color-text)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>LINK / URL</button>
+        <button onClick={() => setMode('file')} style={{ flex: 1, padding: '8px', border: 'none', borderLeft: '1px solid var(--color-text)', background: mode === 'file' ? 'var(--color-text)' : 'transparent', color: mode === 'file' ? '#fff' : 'var(--color-text)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>UPLOAD FILE</button>
+      </div>
+      {mode === 'link'
+        ? <input value={url} onChange={e => onUrl(e.target.value)} placeholder={urlPlaceholder} style={{ ...inputStyle, padding: '8px 10px', width: '100%' }} />
+        : (
+          <div>
+            <input ref={ref} type="file" accept={accept} onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f, URL.createObjectURL(f)); }} style={{ display: 'none' }} />
+            <button onClick={() => ref.current?.click()} style={{ width: '100%', padding: '18px', border: '1px dashed var(--color-neutral-400)', background: 'var(--color-neutral-100)', font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>
+              {file ? `✓  ${file.name}` : 'CLICK TO CHOOSE FILE'}
+            </button>
+            {file && <div style={{ font: '400 10.5px/1 var(--font-body)', color: 'var(--color-neutral-500)', marginTop: 5 }}>{(file.size / 1024).toFixed(0)} KB · {file.type || 'file'}</div>}
           </div>
+        )
+      }
+    </div>
+  );
+}
+
+function AddResourceModal({ st, setSt }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>> }) {
+  const cat = st.resCategory;
+  const close = () => setSt(s => ({ ...s, resAddingResource: false }));
+
+  const TITLES: Record<typeof cat, string> = {
+    processes: 'ADD PROCESS DOCUMENT',
+    vendors: 'ADD VENDOR CONTACT',
+    tools: 'ADD TOOL',
+    training: 'ADD TRAINING VIDEO',
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.5)', display: 'grid', placeItems: 'center', zIndex: 80 }}>
+      <div style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 640, maxWidth: '96vw', maxHeight: '94vh', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '2px solid var(--color-text)', font: '800 15px/1 var(--font-heading)' }}>{TITLES[cat]}</div>
+        <div style={{ flex: 1, overflow: 'auto' }}>
+          {cat === 'processes' && <AddProcessForm setSt={setSt} close={close} />}
+          {cat === 'vendors' && <AddVendorForm setSt={setSt} close={close} />}
+          {cat === 'tools' && <AddToolForm setSt={setSt} close={close} />}
+          {cat === 'training' && <AddTrainingForm st={st} setSt={setSt} close={close} />}
         </div>
-      )}
+      </div>
+    </div>
+  );
+}
+
+function FormFooter({ onSave, onCancel }: { onSave: () => void; onCancel: () => void }) {
+  return (
+    <div style={{ padding: '14px 24px', borderTop: '1px solid var(--color-divider)', display: 'flex', gap: 10 }}>
+      <Button onClick={onSave}>SAVE</Button>
+      <Button variant="secondary" onClick={onCancel}>CANCEL</Button>
+    </div>
+  );
+}
+
+function AddProcessForm({ setSt, close }: { setSt: React.Dispatch<React.SetStateAction<AppState>>; close: () => void }) {
+  const [title, setTitle] = useState('');
+  const [owner, setOwner] = useState('');
+  const [summary, setSummary] = useState('');
+  const [kind, setKind] = useState<'PDF' | 'DOCX' | 'OTHER'>('PDF');
+  const [file, setFile] = useState<File | null>(null);
+  const [fileUrl, setFileUrl] = useState('');
+  const [fileObjectUrl, setFileObjectUrl] = useState('');
+
+  function save() {
+    if (!title.trim()) return;
+    setSt(s => ({
+      ...s,
+      userProcesses: [...(s.userProcesses || []), {
+        id: 'up' + Date.now(), kind, title: title.trim(), owner: owner.trim(),
+        summary: summary.trim(), fileName: file?.name, fileUrl: file ? fileObjectUrl : fileUrl.trim(), sections: [],
+      }],
+      resAddingResource: false,
+    }));
+  }
+
+  return (
+    <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Field label="DOCUMENT TITLE"><input value={title} onChange={e => setTitle(e.target.value)} placeholder="Process name" style={{ ...inputStyle, padding: '8px 10px' }} autoFocus /></Field>
+      <Field label="FILE TYPE">
+        <div style={{ display: 'flex', border: '1px solid var(--color-text)' }}>
+          {(['PDF', 'DOCX', 'OTHER'] as const).map((k, i) => (
+            <button key={k} onClick={() => setKind(k)} style={{ flex: 1, padding: '8px', border: 'none', borderLeft: i > 0 ? '1px solid var(--color-text)' : 'none', background: kind === k ? 'var(--color-text)' : 'transparent', color: kind === k ? '#fff' : 'var(--color-text)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>{k}</button>
+          ))}
+        </div>
+      </Field>
+      <Field label="OWNER / RESPONSIBLE PARTY"><input value={owner} onChange={e => setOwner(e.target.value)} placeholder="Name" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+      <Field label="SUMMARY / WHAT IT COVERS"><textarea value={summary} onChange={e => setSummary(e.target.value)} placeholder="Brief description of this process" rows={3} style={{ ...inputStyle, padding: '8px 10px', resize: 'vertical' }} /></Field>
+      <UploadZone label="DOCUMENT FILE" accept=".pdf,.doc,.docx,.xls,.xlsx,application/*" file={file} url={fileUrl} onFile={(f, u) => { setFile(f); setFileObjectUrl(u); }} onUrl={setFileUrl} urlPlaceholder="https://… SharePoint or direct link" />
+      <FormFooter onSave={save} onCancel={close} />
+    </div>
+  );
+}
+
+function AddVendorForm({ setSt, close }: { setSt: React.Dispatch<React.SetStateAction<AppState>>; close: () => void }) {
+  const [name, setName] = useState('');
+  const [trade, setTrade] = useState(VENDOR_TRADES[1]);
+  const [newTradeMode, setNewTradeMode] = useState(false);
+  const [newTrade, setNewTrade] = useState('');
+  const [about, setAbout] = useState('');
+  const [products, setProducts] = useState('');
+  const [leadTime, setLeadTime] = useState('');
+  const [quoteTurnaround, setQuoteTurnaround] = useState('');
+  const [contacts, setContacts] = useState([{ name: '', role: '', phone: '', email: '' }]);
+
+  function save() {
+    if (!name.trim()) return;
+    const resolvedTrade = newTradeMode ? newTrade.trim() : trade;
+    if (!resolvedTrade) return;
+    const id = 'uv' + Date.now();
+    setSt(s => ({
+      ...s,
+      userVendors: [...(s.userVendors || []), {
+        id, name: name.trim(), trade: resolvedTrade,
+        about: [about.trim(), products.trim() ? `Products/supply: ${products.trim()}` : ''].filter(Boolean).join(' · '),
+        leadTime: leadTime.trim() || '—', quoteTurnaround: quoteTurnaround.trim() || '—', terms: '—',
+        contacts: contacts.filter(c => c.name.trim()),
+      }],
+      customVendorTrades: newTradeMode && newTrade.trim() && !VENDOR_TRADES.includes(newTrade.trim()) && !(s.customVendorTrades || []).includes(newTrade.trim())
+        ? [...(s.customVendorTrades || []), newTrade.trim()]
+        : (s.customVendorTrades || []),
+      resVendorTrade: resolvedTrade,
+      resSelectedVendor: id,
+      resAddingResource: false,
+    }));
+  }
+
+  return (
+    <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Field label="COMPANY NAME"><input value={name} onChange={e => setName(e.target.value)} placeholder="Vendor or supplier name" style={{ ...inputStyle, padding: '8px 10px' }} autoFocus /></Field>
+      <Field label="TRADE">
+        {newTradeMode ? (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input value={newTrade} onChange={e => setNewTrade(e.target.value)} placeholder="New trade name" style={{ ...inputStyle, padding: '8px 10px', flex: 1 }} autoFocus />
+            <button onClick={() => setNewTradeMode(false)} style={{ padding: '8px 12px', border: '1px solid var(--color-divider)', background: 'none', font: '600 10px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>← BACK</button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <select value={trade} onChange={e => setTrade(e.target.value)} style={{ ...inputStyle, padding: '8px 10px', flex: 1, appearance: 'none' }}>
+              {VENDOR_TRADES.slice(1).map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <button onClick={() => setNewTradeMode(true)} style={{ padding: '8px 12px', border: '1px solid var(--color-text)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', flexShrink: 0 }}>+ NEW</button>
+          </div>
+        )}
+      </Field>
+      <Field label="BRIEF DESCRIPTION"><textarea value={about} onChange={e => setAbout(e.target.value)} placeholder="What this vendor does, notable strengths" rows={2} style={{ ...inputStyle, padding: '8px 10px', resize: 'vertical' }} /></Field>
+      <Field label="PRODUCTS / WHAT THEY SUPPLY"><textarea value={products} onChange={e => setProducts(e.target.value)} placeholder="List the products or materials they supply" rows={2} style={{ ...inputStyle, padding: '8px 10px', resize: 'vertical' }} /></Field>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <Field label="LEAD TIME"><input value={leadTime} onChange={e => setLeadTime(e.target.value)} placeholder="e.g. 6–8 wks" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+        <Field label="QUOTE TURNAROUND"><input value={quoteTurnaround} onChange={e => setQuoteTurnaround(e.target.value)} placeholder="e.g. 2–3 days" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+      </div>
+      <div>
+        <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', marginBottom: 10 }}>CONTACTS</div>
+        {contacts.map((c, i) => (
+          <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12, padding: 14, background: 'var(--color-neutral-100)', position: 'relative' }}>
+            <Field label="NAME"><input value={c.name} onChange={e => setContacts(cs => cs.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} placeholder="Full name" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+            <Field label="ROLE / TITLE"><input value={c.role} onChange={e => setContacts(cs => cs.map((x, j) => j === i ? { ...x, role: e.target.value } : x))} placeholder="e.g. Sales Rep" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+            <Field label="PHONE"><input value={c.phone} onChange={e => setContacts(cs => cs.map((x, j) => j === i ? { ...x, phone: e.target.value } : x))} placeholder="(000) 000-0000" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+            <Field label="EMAIL"><input value={c.email} onChange={e => setContacts(cs => cs.map((x, j) => j === i ? { ...x, email: e.target.value } : x))} placeholder="name@company.com" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+            {contacts.length > 1 && <button onClick={() => setContacts(cs => cs.filter((_, j) => j !== i))} style={{ position: 'absolute', top: 8, right: 8, background: 'none', border: 'none', cursor: 'pointer', font: '600 11px/1', color: 'var(--color-neutral-500)' }}>✕</button>}
+          </div>
+        ))}
+        <button onClick={() => setContacts(cs => [...cs, { name: '', role: '', phone: '', email: '' }])} style={{ padding: '7px 14px', border: '1px solid var(--color-divider)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>+ ADD CONTACT</button>
+      </div>
+      <FormFooter onSave={save} onCancel={close} />
+    </div>
+  );
+}
+
+function AddToolForm({ setSt, close }: { setSt: React.Dispatch<React.SetStateAction<AppState>>; close: () => void }) {
+  const TOOL_KINDS = ['TAKEOFF SOFTWARE', 'ESTIMATING SOFTWARE', 'WORKBOOK', 'AI', 'OTHER'];
+  const [name, setName] = useState('');
+  const [kind, setKind] = useState(TOOL_KINDS[0]);
+  const [note, setNote] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const [fileUrl, setFileUrl] = useState('');
+  const [fileObjectUrl, setFileObjectUrl] = useState('');
+
+  function save() {
+    if (!name.trim()) return;
+    const meta = file ? `${file.name.split('.').pop()?.toUpperCase() || 'FILE'} · ${(file.size / 1024).toFixed(0)} KB` : '';
+    setSt(s => ({
+      ...s,
+      userTools: [...(s.userTools || []), {
+        id: 'ut' + Date.now(), name: name.trim(), kind, note: note.trim(),
+        fileUrl: file ? fileObjectUrl : fileUrl.trim(), fileName: file?.name, meta, training: [],
+      }],
+      resAddingResource: false,
+    }));
+  }
+
+  return (
+    <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Field label="TOOL NAME"><input value={name} onChange={e => setName(e.target.value)} placeholder="Tool or software name" style={{ ...inputStyle, padding: '8px 10px' }} autoFocus /></Field>
+      <Field label="TYPE">
+        <select value={kind} onChange={e => setKind(e.target.value)} style={{ ...inputStyle, padding: '8px 10px', appearance: 'none' }}>
+          {TOOL_KINDS.map(k => <option key={k} value={k}>{k}</option>)}
+        </select>
+      </Field>
+      <Field label="DESCRIPTION / HOW IT IS USED"><textarea value={note} onChange={e => setNote(e.target.value)} placeholder="Plain-language explanation of what this tool does and when to use it" rows={3} style={{ ...inputStyle, padding: '8px 10px', resize: 'vertical' }} /></Field>
+      <UploadZone label="INSTALLER / GUIDE FILE" accept=".pdf,.doc,.docx,.exe,.zip,.dmg,application/*" file={file} url={fileUrl} onFile={(f, u) => { setFile(f); setFileObjectUrl(u); }} onUrl={setFileUrl} urlPlaceholder="https://… download or SharePoint link" />
+      <FormFooter onSave={save} onCancel={close} />
+    </div>
+  );
+}
+
+function AddTrainingForm({ st, setSt, close }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; close: () => void }) {
+  const allTypes = [...new Set([...TRAINING_FILTERS.slice(1), ...(st.customTrainingTypes || [])])];
+  const [title, setTitle] = useState('');
+  const [category, setCategory] = useState(st.resTrainingFilter !== 'All training' ? st.resTrainingFilter : allTypes[0]);
+  const [newCatMode, setNewCatMode] = useState(false);
+  const [newCat, setNewCat] = useState('');
+  const [description, setDescription] = useState('');
+  const [length, setLength] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const [videoUrl, setVideoUrl] = useState('');
+  const [videoObjectUrl, setVideoObjectUrl] = useState('');
+
+  function save() {
+    if (!title.trim()) return;
+    const resolvedCat = newCatMode ? newCat.trim() : category;
+    if (!resolvedCat) return;
+    const extraTypes = newCatMode && newCat.trim() && !allTypes.includes(newCat.trim())
+      ? [...(st.customTrainingTypes || []), newCat.trim()] : (st.customTrainingTypes || []);
+    setSt(s => ({
+      ...s,
+      userTrainingVideos: [...(s.userTrainingVideos || []), {
+        id: 'utr' + Date.now(), type: resolvedCat, title: title.trim(),
+        length: length.trim() || '—', description: description.trim(),
+        videoUrl: file ? videoObjectUrl : videoUrl.trim(),
+      }],
+      customTrainingTypes: extraTypes,
+      resTrainingFilter: resolvedCat,
+      resAddingResource: false,
+    }));
+  }
+
+  return (
+    <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Field label="TITLE"><input value={title} onChange={e => setTitle(e.target.value)} placeholder="Video title" style={{ ...inputStyle, padding: '8px 10px' }} autoFocus /></Field>
+      <Field label="CATEGORY">
+        {newCatMode ? (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input value={newCat} onChange={e => setNewCat(e.target.value)} placeholder="New category name" style={{ ...inputStyle, padding: '8px 10px', flex: 1 }} autoFocus />
+            <button onClick={() => setNewCatMode(false)} style={{ padding: '8px 12px', border: '1px solid var(--color-divider)', background: 'none', font: '600 10px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>← BACK</button>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <select value={category} onChange={e => setCategory(e.target.value)} style={{ ...inputStyle, padding: '8px 10px', flex: 1, appearance: 'none' }}>
+              {allTypes.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <button onClick={() => setNewCatMode(true)} style={{ padding: '8px 12px', border: '1px solid var(--color-text)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', flexShrink: 0 }}>+ NEW</button>
+          </div>
+        )}
+      </Field>
+      <Field label="DESCRIPTION"><textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="What will viewers learn?" rows={3} style={{ ...inputStyle, padding: '8px 10px', resize: 'vertical' }} /></Field>
+      <Field label="DURATION"><input value={length} onChange={e => setLength(e.target.value)} placeholder="e.g. 24 min" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+      <UploadZone label="VIDEO SOURCE" accept="video/*" file={file} url={videoUrl} onFile={(f, u) => { setFile(f); setVideoObjectUrl(u); if (!length) setLength('—'); }} onUrl={setVideoUrl} urlPlaceholder="https://… YouTube, Vimeo, SharePoint, or direct link" />
+      <FormFooter onSave={save} onCancel={close} />
+    </div>
+  );
+}
+
+function ProcessRow({ proc, isLast, onRead }: { proc: typeof PROCESSES[0]; isLast: boolean; onRead: () => void }) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} style={{ padding: '14px 24px', borderBottom: isLast ? 'none' : '1px solid var(--color-divider)', background: hovered ? 'var(--color-neutral-100)' : 'var(--color-bg)', display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+      <div style={{ width: 48, height: 48, background: proc.kind === 'PDF' ? 'var(--color-text)' : 'var(--color-neutral-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 10px/1 var(--font-body)', color: proc.kind === 'PDF' ? '#fff' : 'var(--color-text)', flexShrink: 0 }}>{proc.kind}</div>
+      <div style={{ flex: 1 }}>
+        <div style={{ font: '600 13.5px/1 var(--font-body)', marginBottom: 3 }}>{proc.title}</div>
+        <div style={{ font: '500 10.5px/1 var(--font-body)', color: 'var(--color-neutral-600)', letterSpacing: '.06em' }}>OWNER · {proc.owner.toUpperCase()}</div>
+        {hovered && <div style={{ font: '400 11.5px/1.5 var(--font-body)', color: 'var(--color-neutral-700)', marginTop: 8, marginLeft: 0 }}>{proc.summary}</div>}
+      </div>
+      <button onClick={onRead} style={{ padding: '8px 16px', border: '1px solid var(--color-text)', background: 'none', font: '700 10px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer', flexShrink: 0 }}>READ</button>
     </div>
   );
 }

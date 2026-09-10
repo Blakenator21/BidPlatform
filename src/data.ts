@@ -1,13 +1,28 @@
 export type PersonKind = 'exec' | 'manager' | 'estimator';
-export type BidStatus = 'pending' | 'accepted' | 'declined';
+export type BidStatus = 'pending' | 'accepted' | 'declined' | 'review';
+
+export interface GcEntry {
+  company: string; location: string;
+  contactName: string; contactTitle: string;
+  contactEmail: string; contactPhone: string;
+}
+export function emptyGc(): GcEntry {
+  return { company: '', location: '', contactName: '', contactTitle: '', contactEmail: '', contactPhone: '' };
+}
 
 export interface BidProject {
-  id: string; name: string; gc: string; bidDate: string;
+  id: string; name: string;
+  gc: string; // legacy / primary GC company name for display
+  gcs: GcEntry[]; // up to 4 GCs with full contact info
+  bidDate: string;
   level: string; location: string; scope: string;
   planRoom: string; info: string; notes: string;
   status: BidStatus; assignees: string[];
   declineReason: string; declineNote: string;
+  reviewReason: string;
   notified: boolean; photo?: string;
+  archived?: boolean; archivedAt?: string;
+  entryDate?: string; assignedDate?: string;
 }
 
 export const BID_LEVELS = ['100% CD', '90% CD', '75% DD', '50% DD', '100% CD + Add. 3', 'N/A'];
@@ -48,11 +63,10 @@ export const PEOPLE: Person[] = [
   { id: 'allen', name: 'Allen Poole',          first: 'Allen', role: 'Estimator',               initials: 'AP', email: 'AllenPoole@Glass1st.net',             kind: 'estimator', mgr: 'blake' },
   { id: 'nico',  name: 'Nico Goenaga',         first: 'Nico',  role: 'Estimator',               initials: 'NG', email: 'NicolasGoenaga@Glass1st.net',         kind: 'estimator', mgr: 'blake' },
   { id: 'eric',  name: 'Eric Lunsford',        first: 'Eric',  role: 'Estimator',               initials: 'EL', email: 'EricLunsford@Glass1st.net',           kind: 'estimator', mgr: 'luis' },
-  { id: 'timh',  name: 'Tim Hamilton',         first: 'Tim',   role: 'Estimator',               initials: 'TH', email: 'TimHamilton@Glass1st.net',            kind: 'estimator', mgr: 'luis' },
   { id: 'timp',  name: 'Tim Prewett',          first: 'Tim',   role: 'Cladding Estimator',      initials: 'TP', email: 'timprewett@glass1st.net',             kind: 'estimator', mgr: 'chris' },
   { id: 'ray',   name: 'Ray Herring',          first: 'Ray',   role: 'Estimating Director',     initials: 'RH', email: 'RayHerring@Glass1st.net',             kind: 'exec',      mgr: null },
-  { id: 'lucas', name: 'Lucas Braswell',       first: 'Lucas', role: 'Project Developer',        initials: 'LB', email: 'LucasBraswell@Glass1st.net',          kind: 'estimator', mgr: 'blake' },
-  { id: 'justin',name: 'Justin Campana',       first: 'Justin',role: 'Project Developer',        initials: 'JC', email: 'JustinCampana@Glass1st.net',          kind: 'estimator', mgr: 'blake' },
+  { id: 'lucas', name: 'Lucas Braswell',       first: 'Lucas', role: 'Project Developer',        initials: 'LB', email: 'LucasBraswell@Glass1st.net',          kind: 'estimator', mgr: 'paul' },
+  { id: 'justin',name: 'Justin Campana',       first: 'Justin',role: 'Project Developer',        initials: 'JC', email: 'JustinCampana@Glass1st.net',          kind: 'estimator', mgr: 'paul' },
 ];
 
 export const PROJECTS: Project[] = [
@@ -316,50 +330,56 @@ export { workday, monday };
 export const INITIAL_BID_PROJECTS: BidProject[] = [
   {
     id: 'bp1', name: 'Apex Tower Phase 1 — Curtain Wall', gc: 'Turner Construction',
+    gcs: [{ company: 'Turner Construction', location: 'Charlotte, NC', contactName: 'Mark Connelly', contactTitle: 'Project Manager', contactEmail: 'mconnelly@tcco.com', contactPhone: '704-555-0182' }],
     bidDate: 'Sep 20', level: '100% CD', location: 'Charlotte, NC',
     scope: 'Curtain wall, unitized system, 34,000 sf', planRoom: 'https://planroom.turner.com/apex',
     info: 'Full curtain wall envelope for a 22-story mixed-use tower. Unitized system preferred. Alternate for BIPV glazing on south face.',
     notes: 'Turner rep is Mark Connelly — strong relationship. Seen this GC 3x this year.',
-    status: 'pending', assignees: [], declineReason: '', declineNote: '', notified: false,
+    status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false,
   },
   {
     id: 'bp2', name: 'Lakefront Civic Center', gc: 'Brasfield & Gorrie',
+    gcs: [{ company: 'Brasfield & Gorrie', location: 'Columbia, SC', contactName: 'Sandra Park', contactTitle: 'Estimator', contactEmail: 'spark@bg.com', contactPhone: '803-555-0244' }],
     bidDate: 'Sep 15', level: '90% CD', location: 'Columbia, SC',
     scope: 'Storefront, skylights, decorative glass partitions', planRoom: '',
     info: 'New civic building for the City of Columbia. Storefront on three facades plus a 1,200 sf skylight over the atrium.',
     notes: 'Need to confirm if the skylight is structural or just glazing.',
-    status: 'pending', assignees: [], declineReason: '', declineNote: '', notified: false,
+    status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false,
   },
   {
     id: 'bp3', name: 'Meridian Medical Pavilion', gc: 'Skanska USA',
+    gcs: [{ company: 'Skanska USA', location: 'Raleigh, NC', contactName: 'Tom Reyes', contactTitle: 'VP PreCon', contactEmail: 'treyes@skanska.com', contactPhone: '919-555-0371' }],
     bidDate: 'Sep 12', level: '75% DD', location: 'Raleigh, NC',
     scope: 'Window wall replacement, 18,500 sf', planRoom: 'https://skanska.buildingconnected.com/m42',
     info: 'Full window wall replacement on an occupied hospital pavilion. Phased install — must coordinate with infection control.',
     notes: 'DDs only so scope has risk. Price with exclusions.',
-    status: 'pending', assignees: [], declineReason: '', declineNote: '', notified: false,
+    status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false,
   },
   {
     id: 'bp4', name: 'Hartwell Office Complex — Bldg A', gc: 'Batson-Cook',
+    gcs: [{ company: 'Batson-Cook', location: 'Greenville, SC', contactName: 'Dale Fuqua', contactTitle: 'Senior Estimator', contactEmail: 'dfuqua@batson-cook.com', contactPhone: '864-555-0119' }],
     bidDate: 'Sep 05', level: '100% CD', location: 'Greenville, SC',
     scope: 'Curtain wall + aluminum entrances, 9,800 sf', planRoom: '',
     info: 'Four-story Class A office. Standard pressure-glazed curtain wall with punched aluminum entrances at two lobby entries.',
     notes: 'Assigned to Allen. Batson-Cook wants number by noon.',
-    status: 'accepted', assignees: ['allen'], declineReason: '', declineNote: '', notified: true,
+    status: 'accepted', assignees: ['allen'], declineReason: '', declineNote: '', reviewReason: '', notified: true,
   },
   {
     id: 'bp5', name: 'Pinehurst Resort Expansion', gc: 'Ryan Companies',
+    gcs: [{ company: 'Ryan Companies', location: 'Pinehurst, NC', contactName: 'Casey Morton', contactTitle: 'Project Engineer', contactEmail: 'cmorton@ryancompanies.com', contactPhone: '910-555-0067' }],
     bidDate: 'Sep 08', level: '100% CD + Add. 3', location: 'Pinehurst, NC',
     scope: 'Vinyl windows, sliders, glass railings — resort residential', planRoom: '',
     info: 'Phase 2 resort expansion — 48 villa units. Vinyl windows and sliders per unit type, plus glass railing on all decks.',
     notes: 'Nico has the unit matrix from Phase 1.',
-    status: 'accepted', assignees: ['nico'], declineReason: '', declineNote: '', notified: true,
+    status: 'accepted', assignees: ['nico'], declineReason: '', declineNote: '', reviewReason: '', notified: true,
   },
   {
     id: 'bp6', name: 'Blue Ridge Data Center', gc: 'McCarthy Building Companies',
+    gcs: [{ company: 'McCarthy Building Companies', location: 'Asheville, NC', contactName: '', contactTitle: '', contactEmail: '', contactPhone: '' }],
     bidDate: 'Sep 03', level: '90% CD', location: 'Asheville, NC',
     scope: 'Blast-rated storefront and security glazing', planRoom: '',
     info: 'Secure data center facility. All glazing must meet blast and forced-entry ratings. Specialty scope.',
     notes: 'Outside our normal trade — we do not carry blast-rated product lines.',
-    status: 'declined', assignees: [], declineReason: 'Scope outside our trade', declineNote: 'We do not stock or fabricate blast-rated glazing systems. Recommend passing to a security glazing sub.', notified: false,
+    status: 'declined', assignees: [], declineReason: 'Scope outside our trade', declineNote: 'We do not stock or fabricate blast-rated glazing systems. Recommend passing to a security glazing sub.', reviewReason: '', notified: false,
   },
 ];
