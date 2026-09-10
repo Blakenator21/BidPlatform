@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import ReactDOM from 'react-dom';
 import {
   PEOPLE, PROJECTS, mkTasks, INITIAL_REVISIONS, INITIAL_DEALS,
   NOTE_TAGS, WEEKDAY_LABELS,
@@ -46,7 +47,7 @@ function dueColor(t: Task): string {
 const inp = inputStyle;
 
 // ─── types ────────────────────────────────────────────────────────────────────
-type View = 'myday' | 'overview' | 'calendar' | 'capacity' | 'projects' | 'teamconnection' | 'resources';
+type View = 'myday' | 'overview' | 'calendar' | 'capacity' | 'teamcapacity' | 'projects' | 'teamconnection' | 'resources';
 type AppTab = 'board' | 'tracker';
 type IssueRecord = { id: string; taskId: string; from: string; text: string; when: string; status: 'open' | 'resolved'; replies: NoteEntry[]; };
 type ProjNote = NoteEntry & { tag: string; label: string; };
@@ -1320,7 +1321,8 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
   const navItems: Array<[View, string, number]> = isManager
     ? [['myday', 'My day', st.tasks.filter(t => t.who === userId && t.status !== 'Complete').length],
       ['overview', 'Management overview', st.tasks.filter(t => t.status !== 'Complete' && teamOf().some(p => p.id === t.who)).length],
-      ['calendar', 'Calendar', 0], ['capacity', 'Capacity', 0],
+      ['teamcapacity', "My team's capacity", 0],
+      ['calendar', 'Calendar', 0], ['capacity', 'My capacity', 0],
       ['projects', 'Projects', projects.length],
       ['teamconnection', 'Team Connection', tcUnread],
       ['resources', 'Resources', 0]]
@@ -1387,7 +1389,8 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
               {st.view === 'myday' && <MyDayView st={st} setSt={setSt} me={me} isManager={isManager} onSignOut={onSignOut} focusId={focusId} focusProject={focusProject} focusTasks={focusTasks} allFocusProjs={allFocusProjs} projects={projects} setTaskStatus={setTaskStatus} flash={flash} />}
               {st.view === 'overview' && isManager && <OverviewView st={st} setSt={setSt} me={me} isExec={isExec} onSignOut={onSignOut} projects={projects} setTaskStatus={setTaskStatus} flash={flash} openIssues={openIssues} />}
               {st.view === 'calendar' && <CalendarView st={st} setSt={setSt} me={me} isManager={isManager} onSignOut={onSignOut} flash={flash} />}
-              {st.view === 'capacity' && <CapacityView st={st} setSt={setSt} me={me} isManager={isManager} team={teamOf()} onSignOut={onSignOut} />}
+              {st.view === 'capacity' && <CapacityView st={st} setSt={setSt} me={me} isManager={false} team={[me]} onSignOut={onSignOut} />}
+              {st.view === 'teamcapacity' && <CapacityView st={st} setSt={setSt} me={me} isManager={true} team={teamOf()} onSignOut={onSignOut} />}
               {st.view === 'projects' && <ProjectsView st={st} setSt={setSt} me={me} isManager={isManager} projects={projects} setTaskStatus={setTaskStatus} flash={flash} logNote={logNote} onSignOut={onSignOut} />}
               {st.view === 'teamconnection' && <TeamConnectionView st={st} setSt={setSt} me={me} isManager={isManager} />}
               {st.view === 'resources' && <ResourcesView st={st} setSt={setSt} me={me} />}
@@ -2146,22 +2149,31 @@ function CalendarView({ st, setSt, me, isManager, onSignOut, flash, teamMode, te
 const CAP_DAY_LABELS = ['MON', 'TUE', 'WED', 'THU', 'FRI'];
 const DAY_TARGET = 8;
 
-function CapBar({ hrs, isToday }: { hrs: number; isToday: boolean }) {
-  const pct = Math.min(hrs / DAY_TARGET, 1.25); // cap visual at 125%
+function CapBar({ hrs, isToday, tasks = [] }: { hrs: number; isToday: boolean; tasks?: Task[] }) {
+  const [mouse, setMouse] = React.useState<{ x: number; y: number } | null>(null);
+  const pct = Math.min(hrs / DAY_TARGET, 1.25);
   const over = hrs > DAY_TARGET;
   const low = hrs > 0 && hrs < 5;
   const barColor = over ? 'var(--color-accent)' : low ? 'oklch(0.62 0.14 220)' : STATUS.good;
   const fillH = Math.min(pct, 1) * 100;
   const overflowH = over ? Math.min((hrs - DAY_TARGET) / DAY_TARGET, 0.25) / 0.25 * 14 : 0;
+
+  const tooltipW = 240;
+  const tipX = mouse ? Math.min(mouse.x + 12, window.innerWidth - tooltipW - 8) : 0;
+  const tipY = mouse ? mouse.y - 8 : 0;
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, flex: 1 }}>
-      {/* overflow spike above the bar */}
+    <div
+      style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, flex: 1 }}
+      onMouseMove={e => setMouse({ x: e.clientX, y: e.clientY })}
+      onMouseLeave={() => setMouse(null)}
+    >
+      {/* overflow spike */}
       <div style={{ height: 16, display: 'flex', alignItems: 'flex-end', width: '100%', justifyContent: 'center' }}>
         {over && <div style={{ width: '60%', height: overflowH + 'px', background: 'var(--color-accent)', opacity: .55, transition: 'height .3s' }} />}
       </div>
       {/* main bar track */}
       <div style={{ position: 'relative', width: '100%', flex: 1, background: 'var(--color-neutral-200)', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', overflow: 'hidden' }}>
-        {/* 8h target line */}
         <div style={{ position: 'absolute', bottom: '100%', left: 0, right: 0, height: 2, background: isToday ? 'var(--color-accent)' : 'var(--color-neutral-400)', zIndex: 2, transform: 'translateY(100%)' }} />
         <div style={{ width: '100%', height: fillH + '%', background: barColor, transition: 'height .35s cubic-bezier(.22,1,.36,1)', minHeight: hrs > 0 ? 3 : 0 }} />
       </div>
@@ -2169,6 +2181,21 @@ function CapBar({ hrs, isToday }: { hrs: number; isToday: boolean }) {
       <div style={{ font: '800 15px/1 var(--font-heading)', color: over ? 'var(--color-accent)' : hrs === 0 ? 'var(--color-neutral-400)' : 'var(--color-text)' }}>
         {hrs > 0 ? hrs + 'h' : '—'}
       </div>
+      {/* fixed-position tooltip — escapes all overflow clipping */}
+      {mouse && ReactDOM.createPortal(
+        <div style={{ position: 'fixed', top: tipY, left: tipX, zIndex: 9999, background: 'var(--color-text)', color: '#fff', width: tooltipW, boxShadow: '0 4px 20px rgba(0,0,0,.35)', pointerEvents: 'none', transform: 'translateY(-100%)' }}>
+          <div style={{ padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,.15)', font: '700 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'rgba(255,255,255,.6)' }}>
+            {hrs > 0 ? hrs + 'H PLANNED · ' + tasks.length + ' TASK' + (tasks.length !== 1 ? 'S' : '') : 'NO TASKS SCHEDULED'}
+          </div>
+          {tasks.map(t => (
+            <div key={t.id} style={{ padding: '8px 12px', borderBottom: '1px solid rgba(255,255,255,.08)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+              <div style={{ font: '500 11.5px/1.3 var(--font-body)', flex: 1 }}>{t.title}</div>
+              <div style={{ font: '700 11px/1 var(--font-body)', color: 'rgba(255,255,255,.65)', flexShrink: 0, marginTop: 1 }}>{t.hrs}h</div>
+            </div>
+          ))}
+        </div>,
+        document.body
+      )}
     </div>
   );
 }
@@ -2178,17 +2205,18 @@ function CapacityView({ st, setSt, me, isManager, team, onSignOut }: { st: AppSt
   const people = isManager ? team : [me];
 
   const rows = people.map(person => {
-    const dayHrs = CAP_DAY_LABELS.map((_, i) => {
+    const dayData = CAP_DAY_LABELS.map((_, i) => {
       const key = ymd(addDays(wkStart, i));
-      return st.tasks.filter(t => t.who === person.id && t.date === key).reduce((a, t) => a + t.hrs, 0);
+      const tasks = st.tasks.filter(t => t.who === person.id && t.date === key);
+      return { hrs: tasks.reduce((a, t) => a + t.hrs, 0), tasks };
     });
-    const total = dayHrs.reduce((a, h) => a + h, 0);
-    return { person, dayHrs, total };
+    const total = dayData.reduce((a, d) => a + d.hrs, 0);
+    return { person, dayData, total };
   });
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-      <ViewHeader title={isManager ? 'Weekly capacity' : 'My capacity'} me={me} onSignOut={onSignOut} />
+      <ViewHeader title={isManager ? "My team's capacity" : 'My capacity'} me={me} onSignOut={onSignOut} />
 
       {/* toolbar */}
       <div style={{ padding: '16px 32px', borderBottom: '2px solid var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
@@ -2221,7 +2249,7 @@ function CapacityView({ st, setSt, me, isManager, team, onSignOut }: { st: AppSt
 
       {/* person rows */}
       <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
-        {rows.map(({ person, dayHrs, total }) => (
+        {rows.map(({ person, dayData, total }) => (
           <div key={person.id} style={{ display: 'grid', gridTemplateColumns: '200px repeat(5,1fr) 100px', borderBottom: '1px solid var(--color-divider)', flex: 1, minHeight: 120 }}>
             {/* name col */}
             <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 4, background: 'var(--color-neutral-100)', borderRight: '1px solid var(--color-divider)' }}>
@@ -2230,11 +2258,11 @@ function CapacityView({ st, setSt, me, isManager, team, onSignOut }: { st: AppSt
               <div style={{ font: '800 22px/1 var(--font-heading)', color: total > 40 ? 'var(--color-accent)' : total > 0 ? 'var(--color-text)' : 'var(--color-neutral-400)', marginTop: 6 }}>{total > 0 ? total + 'h' : '—'}</div>
             </div>
             {/* day bar cells */}
-            {dayHrs.map((h, i) => {
+            {dayData.map(({ hrs: h, tasks: dayTasks }, i) => {
               const isToday = ymd(addDays(wkStart, i)) === ymd(t0);
               return (
                 <div key={i} style={{ padding: '12px 14px', borderLeft: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', background: isToday ? 'oklch(0.97 0.005 250)' : 'transparent' }}>
-                  <CapBar hrs={h} isToday={isToday} />
+                  <CapBar hrs={h} isToday={isToday} tasks={dayTasks} />
                 </div>
               );
             })}
@@ -2391,9 +2419,20 @@ function TaskPanel({ task, me, isManager, st, setSt, setTaskStatus, addTaskNote,
 }) {
   const [noteDraft, setNoteDraft] = useState('');
   const [issueDraft, setIssueDraft] = useState('');
+  const [editing, setEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState<{ title: string; who: string; due: string; hrs: string; detail: string }>({ title: '', who: '', due: '', hrs: '', detail: '' });
   const proj = PROJECTS.find(p => p.id === task.projectId);
   const projTasks = st.tasks.filter(t => t.projectId === task.projectId);
   const idx = projTasks.findIndex(t => t.id === task.id);
+
+  function startEdit() {
+    setEditDraft({ title: task.title, who: task.who, due: task.due, hrs: String(task.hrs), detail: task.detail });
+    setEditing(true);
+  }
+  function saveEdit() {
+    setSt(s => ({ ...s, tasks: s.tasks.map(t => t.id === task.id ? { ...t, title: editDraft.title.trim() || t.title, who: editDraft.who, due: editDraft.due, hrs: parseInt(editDraft.hrs) || t.hrs, detail: editDraft.detail } : t) }));
+    setEditing(false);
+  }
 
   const SEG_STATUSES: Array<{ value: TaskStatus; label: string }> = [
     { value: 'In Progress', label: 'WIP' },
@@ -2414,9 +2453,19 @@ function TaskPanel({ task, me, isManager, st, setSt, setTaskStatus, addTaskNote,
       </div>
 
       <div style={{ flex: 1, overflow: 'auto' }}>
-        {/* title */}
-        <div style={{ padding: '16px 18px 12px', borderBottom: '1px solid var(--color-divider)' }}>
-          <div style={{ font: '800 18px/1.2 var(--font-heading)' }}>{task.title}</div>
+        {/* title + edit toggle */}
+        <div style={{ padding: '14px 18px 12px', borderBottom: '1px solid var(--color-divider)', display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          {editing
+            ? <input value={editDraft.title} onChange={e => setEditDraft(d => ({ ...d, title: e.target.value }))} style={{ ...inp, flex: 1, font: '700 16px/1.2 var(--font-heading)', padding: '6px 8px' }} autoFocus />
+            : <div style={{ font: '800 18px/1.2 var(--font-heading)', flex: 1 }}>{task.title}</div>
+          }
+          {editing
+            ? <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                <button onClick={saveEdit} style={{ padding: '6px 12px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>SAVE</button>
+                <button onClick={() => setEditing(false)} style={{ padding: '6px 10px', background: 'none', border: '1px solid var(--color-divider)', font: '600 10px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>CANCEL</button>
+              </div>
+            : <button onClick={startEdit} style={{ padding: '5px 10px', background: 'none', border: '1px solid var(--color-divider)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', flexShrink: 0, color: 'var(--color-neutral-600)' }}>EDIT</button>
+          }
         </div>
 
         {/* status */}
@@ -2427,16 +2476,39 @@ function TaskPanel({ task, me, isManager, st, setSt, setTaskStatus, addTaskNote,
 
         {/* meta */}
         <div style={{ padding: '10px 18px', borderBottom: '1px solid var(--color-divider)', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-          <div><div style={T.label}>OWNER</div><div style={{ font: '500 13px/1 var(--font-body)', marginTop: 4 }}>{me.id === task.who ? me.first + ' (you)' : personName(task.who).replace(/(\w+)\s(\w+)/, '$1 ' + personInitials(task.who)[1])}</div></div>
-          <div><div style={T.label}>DUE</div><div style={{ font: '600 13px/1 var(--font-body)', marginTop: 4, color: dueColor(task) }}>{task.due}</div></div>
-          <div><div style={T.label}>HOURS</div><div style={{ font: '600 13px/1 var(--font-body)', marginTop: 4 }}>{task.hrs}</div></div>
+          <div>
+            <div style={T.label}>OWNER</div>
+            {editing
+              ? <select value={editDraft.who} onChange={e => setEditDraft(d => ({ ...d, who: e.target.value }))} style={{ ...inp, marginTop: 4, width: '100%', fontSize: 12 }}>
+                  {PEOPLE.filter(p => p.kind === 'estimator' || p.kind === 'manager').map(p => <option key={p.id} value={p.id}>{p.first}</option>)}
+                </select>
+              : <div style={{ font: '500 13px/1 var(--font-body)', marginTop: 4 }}>{me.id === task.who ? me.first + ' (you)' : personName(task.who).replace(/(\w+)\s(\w+)/, '$1 ' + personInitials(task.who)[1])}</div>
+            }
+          </div>
+          <div>
+            <div style={T.label}>DUE</div>
+            {editing
+              ? <input value={editDraft.due} onChange={e => setEditDraft(d => ({ ...d, due: e.target.value }))} placeholder="e.g. Sep 12" style={{ ...inp, marginTop: 4, width: '100%', fontSize: 12 }} />
+              : <div style={{ font: '600 13px/1 var(--font-body)', marginTop: 4, color: dueColor(task) }}>{task.due}</div>
+            }
+          </div>
+          <div>
+            <div style={T.label}>HOURS</div>
+            {editing
+              ? <input value={editDraft.hrs} onChange={e => setEditDraft(d => ({ ...d, hrs: e.target.value }))} type="number" min="0.5" step="0.5" style={{ ...inp, marginTop: 4, width: '100%', fontSize: 12 }} />
+              : <div style={{ font: '600 13px/1 var(--font-body)', marginTop: 4 }}>{task.hrs}</div>
+            }
+          </div>
         </div>
 
         {/* scope note */}
-        {task.detail && (
+        {(task.detail || editing) && (
           <div style={{ padding: '10px 18px', borderBottom: '1px solid var(--color-divider)' }}>
             <div style={{ ...T.label, marginBottom: 6 }}>SCOPE NOTE</div>
-            <div style={T.body}>{task.detail}</div>
+            {editing
+              ? <textarea value={editDraft.detail} onChange={e => setEditDraft(d => ({ ...d, detail: e.target.value }))} placeholder="Add a scope note…" style={{ ...inp, width: '100%', minHeight: 64, resize: 'vertical', fontSize: 12 }} />
+              : <div style={T.body}>{task.detail}</div>
+            }
           </div>
         )}
 
