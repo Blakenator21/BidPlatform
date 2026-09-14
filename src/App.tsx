@@ -302,21 +302,95 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
     };
     PROJECTS.push(newProj);
 
-    // generate 4 tasks
+    // generate tasks anchored to assignment date and bid due date
     const t0 = today0();
-    const bidDueDate = seedShiftDate(bid.bidDate) || addDays(t0, 14);
     const primary = assignees[0];
-    function mkTask(title: string, d: Date, hrs: number): Task {
+    const size = bid.jobSize || 'medium';
+
+    function nextWd(d: Date): Date {
+      const nd = addDays(d, 1);
+      const day = nd.getDay();
+      if (day === 0) return addDays(nd, 1);
+      if (day === 6) return addDays(nd, 2);
+      return nd;
+    }
+    function prevWd(d: Date): Date {
+      const pd = addDays(d, -1);
+      const day = pd.getDay();
+      if (day === 0) return addDays(pd, -1);
+      if (day === 6) return addDays(pd, -1);
+      return pd;
+    }
+    function nthWorkday(start: Date, n: number): Date {
+      let d = new Date(start);
+      for (let i = 0; i < n; i++) d = nextWd(d);
+      return d;
+    }
+    function makeTask(title: string, d: Date, hrs: number, detail: string): Task {
       const wd = d.getDay() === 0 ? addDays(d, 1) : d.getDay() === 6 ? addDays(d, 2) : d;
       const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][wd.getDay()];
-      return { id: 'bt' + Date.now() + Math.random().toString(36).slice(2), title, projectId: projId, who: primary, status: 'To-Do', due: prettyShort(wd), day: dayName, date: ymd(wd), hrs, detail: '', notes: [] };
+      return { id: 'bt' + Date.now() + Math.random().toString(36).slice(2), title, projectId: projId, who: primary, status: 'To-Do', due: prettyShort(wd), day: dayName, date: ymd(wd), hrs, detail, notes: [] };
     }
-    const newTasks: Task[] = [
-      mkTask('Send intro email to GC', addDays(t0, 1), 1),
-      mkTask('Takeoff + RFQs out', addDays(t0, 2), 6),
-      mkTask('Manager review', addDays(bidDueDate, -1), 2),
-      mkTask('Estimate & proposal finalization', bidDueDate, 3),
-    ];
+
+    const DAY_CAP = 8;
+    const newTasks: Task[] = [];
+
+    // Track hours used per date across existing tasks + newly queued tasks
+    const dayUsed: Record<string, number> = {};
+    for (const t of st.tasks.filter(t => t.who === primary)) {
+      if (t.date) dayUsed[t.date] = (dayUsed[t.date] || 0) + (t.hrs || 0);
+    }
+    function hoursUsed(d: Date): number {
+      return dayUsed[ymd(d)] || 0;
+    }
+    function reserveHours(d: Date, hrs: number) {
+      const k = ymd(d);
+      dayUsed[k] = (dayUsed[k] || 0) + hrs;
+    }
+
+    // Schedule a task starting on anchorDate, overflow to next workdays
+    function scheduleTask(title: string, anchorDate: Date, totalHrs: number, detail: string) {
+      let d = new Date(anchorDate);
+      if (d.getDay() === 0) d = addDays(d, 1);
+      if (d.getDay() === 6) d = addDays(d, 2);
+      let remaining = totalHrs;
+      while (remaining > 0) {
+        const available = DAY_CAP - hoursUsed(d);
+        if (available <= 0) { d = nextWd(d); continue; }
+        const chunk = Math.min(remaining, available);
+        const t = makeTask(remaining > chunk ? title + ' (cont.)' : title, d, chunk, detail);
+        newTasks.push(t);
+        reserveHours(d, chunk);
+        remaining -= chunk;
+        if (remaining > 0) d = nextWd(d);
+      }
+    }
+
+    const bidDue = seedShiftDate(bid.bidDate) || nthWorkday(t0, 10);
+    const day1 = nthWorkday(t0, 1);   // assignment + 1
+    const day3 = nthWorkday(t0, 3);   // assignment + 3
+    const day4 = nthWorkday(t0, 4);   // assignment + 4
+    const dayBidMinus1 = prevWd(bidDue);
+    const dayBid = bidDue.getDay() === 0 ? addDays(bidDue, 1) : bidDue.getDay() === 6 ? addDays(bidDue, 2) : bidDue;
+
+    // Day +1: Project Acceptance, Download & Review, Vendor Distribution (all same day)
+    scheduleTask('Project Acceptance and Customer Engagement', day1, 0.5, 'a. Intro Emails\nb. RFI\'s');
+    scheduleTask('Download and Review Project Documents', day1, size === 'large' ? 3 : size === 'medium' ? 2 : 1, 'a. Initial review of the drawings to confirm scope\nb. Review all specifications\nc. Review Project Manual\nd. Review Addenda\ne. Review Project Schedule\nf. Review Bid Forms\ng. Create Project Folder');
+    scheduleTask('Vendor Distribution', day1, 0.5, 'a. Send out RFQ\'s for Division 7 & 8');
+
+    // Day +3: Plan Set Review & Takeoff
+    scheduleTask('Plan Set Review & Takeoff', day3, size === 'large' ? 12 : size === 'medium' ? 6 : 3, 'a. Design Criteria\n  i. General Notes\n  ii. Building Code\n  iii. Design Loads\n  iv. Wind Pressures\n  v. Performance Requirements\n  vi. Fire Ratings\n  vii. Accessibility Requirements\nb. Architectural Drawings Takeoff\n  i. Overall Floor Plans\n  ii. Enlarged Floor Plans\n  iii. Overall Elevations\n  iv. Enlarged Elevations\n  v. Reflected Ceiling Plans\n  vi. Roof Plans\n  vii. Exterior Details\nc. Details\n  i. Door Schedules\n  ii. Frame Details\n  iii. Window Schedules\n  iv. Curtain Wall Schedules\n  v. Finish Schedules\n  vi. Hardware Schedules\n  vii. Glass Schedules\nd. Quantities\n  i. Curtainwall  ii. Storefront  iii. Windows  iv. Entrances  v. Doors  vi. Glass  vii. Louvers  viii. Panels  ix. Misc glazing  x. Flashings  xi. Trim  xii. Sealants  xiii. Accessories\n  xiv. Verify all quantities against schedules and drawing details\ne. Review Other Drawing Disciplines\n  i. Structural Drawings  ii. Metal Panel Drawings  iii. Waterproofing Details  iv. Interior Details\nf. Identify Drawing Conflicts\n  i. Drawings and specifications  ii. Floor plans and elevations  iii. Elevations and details  iv. Schedules and details  v. Architectural and structural  vi. Architectural and mechanical\ng. Missing Information\n  i. Request clarification from GC  ii. Submit an RFI if Necessary');
+
+    // Day +4: Building the Costing Sheet
+    scheduleTask('Building the Costing Sheet', day4, size === 'large' ? 4 : size === 'medium' ? 2 : 1, 'a. Costing Sheet\n  i. Enter all final material pricing  ii. Enter all labor hours  iii. Enter equipment costs  iv. Enter subcontractor costs  v. Verify taxes applied correctly  vi. Review final markups  vii. Confirm final selling price prior to proposal submission\nb. Bond Calculator\nc. Job Recap\n  i. Verify Labor Calculations  ii. Enter selected vendor totals  iii. Confirm glazing totals  iv. Review overall material costs  v. Verify labor hours from production rates\nd. Elevation Recap - Enter all dimensions for: Storefront, Window Wall, Curtainwall, Entrances, Sunshades, Misc Framing\ne. Equipment: Boom lifts, Scissor Lifts, Forklifts, Cranes, Specialized Installation Equipment\nf. Swing Stage: Rental Duration, Mobilization, Installation, Removal, Safety Requirements\ng. G1-G11 Glazing Tabs\n  i. Enter Glass Sizes  ii. Enter Glazing Quantities  iii. Compare Multiple Fabricator quotations  iv. Verify Glass make-up  v. Verify Low-E Coatings  vi. Verify performance requirements  vii. Verify specification compliance\nh. Vendor Quote Management\n  i. Review each quote for spec compliance  ii. Verify glass make-up, framing, finishes, accessories & exclusions  iii. Compare pricing from multiple qualified vendors  iv. Confirm quote satisfies design criteria\ni. Material Lead Times: Identify schedule risks, Assist business development, Support schedule qualifications, Coordinate procurement planning');
+
+    // Bid date −1: Review with Manager
+    scheduleTask('Review with Manager', dayBidMinus1, 1, 'a. Review final pricing and scope\nb. Confirm qualifications and exclusions\nc. Discuss strategy and presentation approach');
+
+    // Bid date: Writing Proposal + Presentation Packet + Submission
+    scheduleTask('Writing the Proposal', dayBid, size === 'large' ? 2 : size === 'medium' ? 1 : 0.5, 'a. Proposal ID\nb. Bid Date\nc. Project Name & Location\nd. Documents Provided\ne. Scope & Materials\nf. Pricing\ng. Qualifications, Inclusions & Exclusions\nh. 1CG Warranty & Disclaimer\ni. Correspondence to GC — PDF Proposal, Key mentions in email body, Presentation Packet/Takeoffs of highlighted scope');
+    scheduleTask('Creating the Presentation Packet', dayBid, size === 'large' ? 1 : 0.5, 'a. Cover page\nb. Preliminary installation schedule\nc. Highlighted floor plans, elevations, and details\nd. Finish chart\ne. Product Data: Glass Type info, Every System Type\nf. Proposal Drawings\ng. 1CG Fabrications Capabilities\nh. 1CG Office locations\ni. 1CG Portfolio Pictures');
+    scheduleTask('Submission of Proposal to Customer', dayBid, 0.5, 'a. Bid Forms');
 
     // create Deal
     const today = new Date().toLocaleDateString([], { month: 'short', day: '2-digit' });
@@ -337,6 +411,7 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
 
   function saveDraft() {
     if (!draft.name?.trim()) { flash('Enter a project name'); return; }
+    if (!draft.jobSize) { flash('Select a job size (Large / Medium / Small)'); return; }
     const gcs = (draft.gcs && draft.gcs.length > 0) ? draft.gcs : [emptyGc()];
     const gc = gcs[0]?.company || draft.gc || '';
     if (editBid) {
@@ -651,7 +726,10 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
 
                     {/* card body */}
                     <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
-                      <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-accent)' }}>{bid.gc || 'GC TO BE CONFIRMED'}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-accent)' }}>{bid.gc || 'GC TO BE CONFIRMED'}</div>
+                        {bid.jobSize && <div style={{ padding: '2px 7px', background: bid.jobSize === 'large' ? 'var(--color-text)' : bid.jobSize === 'medium' ? 'oklch(0.50 0.18 240)' : 'var(--color-neutral-500)', color: '#fff', font: '700 9px/1 var(--font-body)', letterSpacing: '.1em' }}>{bid.jobSize.toUpperCase()}</div>}
+                      </div>
                       <div style={{ font: '800 15px/1.2 var(--font-heading)' }}>{bid.name}</div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                         {[['BID DATE', bid.bidDate || '—'], ['DRAWINGS', bid.level], ['LOCATION', bid.location || '—'], ['SCOPE', bid.scope || '—']].map(([l, v]) => (
@@ -1084,6 +1162,14 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                     </Field>
                     <Field label="LOCATION">
                       <input value={draft.location || ''} onChange={e => setDraft(d => ({ ...d, location: e.target.value }))} placeholder="City, ST" style={inp} />
+                    </Field>
+                    <Field label="JOB SIZE">
+                      <select value={draft.jobSize || ''} onChange={e => setDraft(d => ({ ...d, jobSize: e.target.value as 'large' | 'medium' | 'small' }))} style={inp}>
+                        <option value="">Select size…</option>
+                        <option value="large">Large</option>
+                        <option value="medium">Medium</option>
+                        <option value="small">Small</option>
+                      </select>
                     </Field>
                     <div style={{ gridColumn: '1/-1' }}><Field label="SCOPE OF WORK">
                       <input value={draft.scope || ''} onChange={e => setDraft(d => ({ ...d, scope: e.target.value }))} placeholder="e.g. Curtain wall & storefront" style={inp} />
@@ -1640,7 +1726,7 @@ function MyDayView({ st, setSt, me, isManager, onSignOut, focusId, focusProject,
                             {done && <span style={{ color: '#fff', fontSize: 11, lineHeight: 1 }}>✓</span>}
                           </button>
                           <button onClick={() => setSt(s => ({ ...s, openTaskId: t.id }))} style={{ textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0, padding: 0 }}>
-                            <span style={{ font: '600 13.5px/1.3 var(--font-body)', textDecoration: done ? 'line-through' : 'none', opacity: done ? .55 : 1 }}>{t.title}</span>
+                            <span style={{ font: '600 13.5px/1.3 var(--font-body)', textDecoration: done ? 'line-through' : 'none', opacity: done ? .55 : 1, display: 'flex', alignItems: 'center', gap: 6 }}>{t.title} {t.detail && <TaskSubTooltip detail={t.detail} />}</span>
                             <span style={T.micro}>· {t.status} · {personFirst(t.who)} · {t.hrs}h</span>
                             {lastNote && <span style={{ ...T.meta, marginTop: 1 }}>{lastNote.slice(0, 80)}{lastNote.length > 80 ? '…' : ''}</span>}
                           </button>
@@ -1786,6 +1872,36 @@ function MyDayView({ st, setSt, me, isManager, onSignOut, focusId, focusProject,
 // ─── Kanban Columns ────────────────────────────────────────────────────────────
 const STATUS_ORDER: TaskStatus[] = ['To-Do', 'In Progress', 'Awaiting Response', 'Complete'];
 
+function TaskSubTooltip({ detail }: { detail: string }) {
+  const [mouse, setMouse] = React.useState<{ x: number; y: number } | null>(null);
+  if (!detail) return null;
+  const lines = detail.split('\n').filter(Boolean);
+  return (
+    <span
+      onMouseMove={e => { e.stopPropagation(); setMouse({ x: e.clientX, y: e.clientY }); }}
+      onMouseLeave={() => setMouse(null)}
+      onClick={e => e.stopPropagation()}
+      style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16, borderRadius: '50%', background: 'var(--color-neutral-300)', font: '700 9px/1 var(--font-body)', color: 'var(--color-neutral-700)', cursor: 'help', flexShrink: 0 }}
+    >
+      i
+      {mouse && ReactDOM.createPortal(
+        <div style={{ position: 'fixed', top: mouse.y, left: mouse.x + 14, zIndex: 9999, background: 'var(--color-text)', color: '#fff', width: 260, maxHeight: 320, overflowY: 'auto', boxShadow: '0 4px 20px rgba(0,0,0,.35)', pointerEvents: 'none', transform: 'translateY(-50%)' }}>
+          <div style={{ padding: '6px 10px', borderBottom: '1px solid rgba(255,255,255,.15)', font: '700 9px/1 var(--font-body)', letterSpacing: '.12em', color: 'rgba(255,255,255,.55)' }}>CHECKLIST</div>
+          {lines.map((line, i) => {
+            const indent = (line.match(/^(\s+)/)?.[1].length || 0) > 0;
+            return (
+              <div key={i} style={{ padding: indent ? '4px 10px 4px 22px' : '5px 10px', font: indent ? '400 10.5px/1.4 var(--font-body)' : '500 11px/1.4 var(--font-body)', color: indent ? 'rgba(255,255,255,.65)' : '#fff', borderBottom: '1px solid rgba(255,255,255,.06)' }}>
+                {line.trim()}
+              </div>
+            );
+          })}
+        </div>,
+        document.body
+      )}
+    </span>
+  );
+}
+
 function KanbanColumns({ focusProject, focusTasks, openTasks, STATUSES, setSt, setTaskStatus }: {
   focusProject: Project | undefined; focusTasks: Task[]; openTasks: Task[];
   STATUSES: TaskStatus[]; setSt: React.Dispatch<React.SetStateAction<AppState>>;
@@ -1843,7 +1959,7 @@ function KanbanColumns({ focusProject, focusTasks, openTasks, STATUSES, setSt, s
                     style={{ border: '1px solid var(--color-divider)', background: dragging === t.id ? 'var(--color-neutral-300)' : 'var(--color-neutral-100)', cursor: 'grab', opacity: dragging === t.id ? .5 : 1 }}
                   >
                     <button onClick={() => setSt(s => ({ ...s, openTaskId: t.id }))} style={{ width: '100%', textAlign: 'left', padding: '11px 12px', background: 'none', border: 'none', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 5 }}>
-                      <span style={{ font: '600 13px/1.3 var(--font-body)' }}>{t.title}</span>
+                      <span style={{ font: '600 13px/1.3 var(--font-body)', display: 'flex', alignItems: 'center', gap: 6 }}>{t.title} {t.detail && <TaskSubTooltip detail={t.detail} />}</span>
                       <span style={T.micro}>{PROJECTS.find(p => p.id === t.projectId)?.short} · {t.due}</span>
                     </button>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px', borderTop: '1px solid var(--color-divider)', gap: 4 }}>
@@ -2237,11 +2353,16 @@ function CapacityView({ st, setSt, me, isManager, team, onSignOut }: { st: AppSt
   const t0 = today0(); const wkStart = addDays(mondayOf(t0), st.capOff * 7);
   const people = isManager ? team : [me];
 
+  // Email & Job Catchup baseline: 1hr on every other workday (Mon, Wed, Fri of each week = indices 0, 2, 4)
+  const CATCHUP_TASK: Task = { id: 'catchup-baseline', title: 'Email & Job Catchup', projectId: '', who: '', status: 'To-Do', due: '', day: '', date: '', hrs: 1, detail: 'a. Emails for each day\nb. Negotiating the Sale\nc. Comeback Items\nd. Follow Up', notes: [] };
+
   const rows = people.map(person => {
     const dayData = CAP_DAY_LABELS.map((_, i) => {
       const key = ymd(addDays(wkStart, i));
       const tasks = st.tasks.filter(t => t.who === person.id && t.date === key);
-      return { hrs: tasks.reduce((a, t) => a + t.hrs, 0), tasks };
+      // Add catchup baseline on Mon (0), Wed (2), Fri (4) of the displayed week
+      const withCatchup = i % 2 === 0 ? [{ ...CATCHUP_TASK, date: key, who: person.id }, ...tasks] : tasks;
+      return { hrs: withCatchup.reduce((a, t) => a + t.hrs, 0), tasks: withCatchup };
     });
     const total = dayData.reduce((a, d) => a + d.hrs, 0);
     return { person, dayData, total };
@@ -2537,10 +2658,21 @@ function TaskPanel({ task, me, isManager, st, setSt, setTaskStatus, addTaskNote,
         {/* scope note */}
         {(task.detail || editing) && (
           <div style={{ padding: '10px 18px', borderBottom: '1px solid var(--color-divider)' }}>
-            <div style={{ ...T.label, marginBottom: 6 }}>SCOPE NOTE</div>
+            <div style={{ ...T.label, marginBottom: 8 }}>CHECKLIST</div>
             {editing
-              ? <textarea value={editDraft.detail} onChange={e => setEditDraft(d => ({ ...d, detail: e.target.value }))} placeholder="Add a scope note…" style={{ ...inp, width: '100%', minHeight: 64, resize: 'vertical', fontSize: 12 }} />
-              : <div style={T.body}>{task.detail}</div>
+              ? <textarea value={editDraft.detail} onChange={e => setEditDraft(d => ({ ...d, detail: e.target.value }))} placeholder="Add checklist items…" style={{ ...inp, width: '100%', minHeight: 80, resize: 'vertical', fontSize: 12 }} />
+              : <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {task.detail.split('\n').filter(Boolean).map((line, i) => {
+                    const indent = line.match(/^(\s+)/)?.[1].length || 0;
+                    const isMain = /^[a-z]\./i.test(line.trim()) && indent === 0;
+                    const isSub = indent > 0;
+                    return (
+                      <div key={i} style={{ paddingLeft: isMain ? 8 : isSub ? 20 : 0, font: isMain ? '600 11.5px/1.4 var(--font-body)' : '400 11px/1.4 var(--font-body)', color: isMain ? 'var(--color-text)' : 'var(--color-neutral-600)', borderLeft: isMain ? '2px solid var(--color-accent)' : 'none'}}>
+                        {line.trim()}
+                      </div>
+                    );
+                  })}
+                </div>
             }
           </div>
         )}

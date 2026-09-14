@@ -23,6 +23,7 @@ export interface BidProject {
   notified: boolean; photo?: string;
   archived?: boolean; archivedAt?: string;
   entryDate?: string; assignedDate?: string;
+  jobSize?: 'large' | 'medium' | 'small';
 }
 
 export const BID_LEVELS = ['100% CD', '90% CD', '75% DD', '50% DD', '100% CD + Add. 3', 'N/A'];
