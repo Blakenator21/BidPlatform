@@ -47,7 +47,7 @@ function dueColor(t: Task): string {
 const inp = inputStyle;
 
 // ─── types ────────────────────────────────────────────────────────────────────
-type View = 'myday' | 'overview' | 'calendar' | 'capacity' | 'teamcapacity' | 'projects' | 'teamconnection' | 'resources';
+type View = 'myday' | 'overview' | 'calendar' | 'capacity' | 'teamcapacity' | 'projects' | 'teamconnection' | 'resources' | 'meetings';
 type AppTab = 'board' | 'tracker';
 type IssueRecord = { id: string; taskId: string; from: string; text: string; when: string; status: 'open' | 'resolved'; replies: NoteEntry[]; };
 type ProjNote = NoteEntry & { tag: string; label: string; };
@@ -96,7 +96,31 @@ interface AppState {
   userVendors: Array<{ id: string; name: string; trade: string; about: string; leadTime: string; quoteTurnaround: string; terms: string; contacts: Array<{ name: string; role: string; phone: string; email: string }> }>;
   customVendorTrades: string[];
   userTools: Array<{ id: string; name: string; kind: string; note: string; fileUrl?: string; fileName?: string; meta: string; training: string[] }>;
+  memberStatuses: Record<string, MemberStatus>;
+  meetingState: 'idle' | 'prompt' | 'recording' | 'processing' | 'confirming';
+  meetingSource: string;
+  meetingRecordingBlob: string | null;
+  meetingDraft: {
+    transcript: string;
+    suggestedProjectId: string;
+    notes: Array<{ tag: string; text: string }>;
+    tasks: Array<{ title: string; who: string; hrs: number; due: string }>;
+  } | null;
+  meetingHistory: Array<{
+    id: string; at: number; source: string; projectId: string;
+    transcript: string; notesAdded: number; tasksAdded: number;
+  }>;
 }
+
+type MemberStatus = 'available' | 'busy' | 'in-meeting' | 'out-of-town' | 'out-of-office' | 'do-not-disturb';
+const STATUS_OPTIONS: Array<{ value: MemberStatus; label: string; color: string; dot: string }> = [
+  { value: 'available',     label: 'Available',       color: '#1f7a4d', dot: '#22c55e' },
+  { value: 'busy',          label: 'Busy',            color: '#b45309', dot: '#f59e0b' },
+  { value: 'in-meeting',    label: 'In a Meeting',    color: '#6d28d9', dot: '#a78bfa' },
+  { value: 'out-of-town',   label: 'Out of Town',     color: '#0369a1', dot: '#38bdf8' },
+  { value: 'out-of-office', label: 'Out of Office',   color: '#6b7280', dot: '#9ca3af' },
+  { value: 'do-not-disturb','label': 'Do Not Disturb', color: '#dc2626', dot: '#f87171' },
+];
 
 function initState(userId: string): AppState {
   const tasks = mkTasks();
@@ -164,6 +188,12 @@ function initState(userId: string): AppState {
     userVendors: [],
     userTools: [],
     customVendorTrades: [],
+    memberStatuses: {},
+    meetingState: 'idle',
+    meetingSource: 'manual',
+    meetingRecordingBlob: null,
+    meetingDraft: null,
+    meetingHistory: [],
   };
 }
 
@@ -1325,11 +1355,13 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
       ['calendar', 'Calendar', 0], ['capacity', 'My capacity', 0],
       ['projects', 'Projects', projects.length],
       ['teamconnection', 'Team Connection', tcUnread],
+      ['meetings', 'AI Meeting Notes', st.meetingHistory.length],
       ['resources', 'Resources', 0]]
     : [['myday', 'My day', st.tasks.filter(t => t.who === userId && t.status !== 'Complete').length],
       ['calendar', 'Calendar', 0], ['projects', 'Projects', projects.length],
       ['teamconnection', 'Team Connection', tcUnread],
       ['capacity', 'My capacity', 0],
+      ['meetings', 'AI Meeting Notes', st.meetingHistory.length],
       ['resources', 'Resources', 0]];
 
   return (
@@ -1393,6 +1425,7 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
               {st.view === 'teamcapacity' && <CapacityView st={st} setSt={setSt} me={me} isManager={true} team={teamOf()} onSignOut={onSignOut} />}
               {st.view === 'projects' && <ProjectsView st={st} setSt={setSt} me={me} isManager={isManager} projects={projects} setTaskStatus={setTaskStatus} flash={flash} logNote={logNote} onSignOut={onSignOut} />}
               {st.view === 'teamconnection' && <TeamConnectionView st={st} setSt={setSt} me={me} isManager={isManager} />}
+              {st.view === 'meetings' && <MeetingNotesView st={st} setSt={setSt} me={me} projects={projects} flash={flash} />}
               {st.view === 'resources' && <ResourcesView st={st} setSt={setSt} me={me} />}
             </div>
           </div>
@@ -2606,6 +2639,292 @@ const QUICK_MESSAGES = ['Yes', 'No', 'Not sure', 'I have a question', 'Can you g
 
 function convKey(a: string, b: string) { return [a, b].sort().join('~'); }
 
+// ─── AI Meeting Notes ──────────────────────────────────────────────────────────
+function MeetingNotesView({ st, setSt, me, projects, flash }: {
+  st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person;
+  projects: Project[]; flash: (m: string) => void;
+}) {
+  const mediaRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const [elapsed, setElapsed] = React.useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [confirmProj, setConfirmProj] = React.useState(st.meetingDraft?.suggestedProjectId || projects[0]?.id || '');
+  const [editNotes, setEditNotes] = React.useState<Array<{ tag: string; text: string }>>(st.meetingDraft?.notes || []);
+  const [editTasks, setEditTasks] = React.useState<Array<{ title: string; who: string; hrs: number; due: string }>>(st.meetingDraft?.tasks || []);
+
+  React.useEffect(() => {
+    if (st.meetingDraft) {
+      setConfirmProj(st.meetingDraft.suggestedProjectId || projects[0]?.id || '');
+      setEditNotes(st.meetingDraft.notes);
+      setEditTasks(st.meetingDraft.tasks);
+    }
+  }, [st.meetingDraft]);
+
+  async function startRecording() {
+    try {
+      // Capture system/PC audio via screen share with audio — works for any meeting app
+      const displayStream = await (navigator.mediaDevices as MediaDevices & { getDisplayMedia: (c: MediaStreamConstraints) => Promise<MediaStream> }).getDisplayMedia({ audio: true, video: false });
+      const audioTracks = displayStream.getAudioTracks();
+      if (!audioTracks.length) {
+        displayStream.getTracks().forEach(t => t.stop());
+        flash('No audio track found — make sure to check "Share system audio" in the prompt');
+        return;
+      }
+      const stream = new MediaStream(audioTracks);
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg';
+      const mr = new MediaRecorder(stream, { mimeType });
+      chunksRef.current = [];
+      mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mr.onstop = () => { stream.getTracks().forEach(t => t.stop()); displayStream.getTracks().forEach(t => t.stop()); processRecording(); };
+      mr.start(1000);
+      mediaRef.current = mr;
+      setElapsed(0);
+      timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
+      setSt(s => ({ ...s, meetingState: 'recording', meetingSource: 'system audio' }));
+    } catch {
+      flash('Could not capture audio — make sure to allow screen sharing and check "Share system audio"');
+    }
+  }
+
+  function stopRecording() {
+    if (timerRef.current) clearInterval(timerRef.current);
+    mediaRef.current?.stop();
+    setSt(s => ({ ...s, meetingState: 'processing' }));
+  }
+
+  async function processRecording() {
+    const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+    let transcript = '';
+    let draft: AppState['meetingDraft'];
+
+    const apiKey = import.meta.env.VITE_OPENAI_API_KEY as string | undefined;
+    if (apiKey) {
+      try {
+        const form = new FormData();
+        form.append('file', blob, 'meeting.webm');
+        form.append('model', 'whisper-1');
+        const r = await fetch('https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + apiKey }, body: form });
+        const json = await r.json();
+        transcript = json.text || '';
+
+        const gpt = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'system', content: 'Extract from this meeting transcript: 1) A list of notes (tag: gc|spec|cost|schedule, text) and 2) Action items (title, who (first name), hrs estimate 1-8, due like "Mon" or "Oct 15"). Return JSON: {"notes":[{"tag":"gc","text":"..."}],"tasks":[{"title":"...","who":"...","hrs":2,"due":"..."}],"project":"best guess at project name"}' }, { role: 'user', content: transcript }],
+            response_format: { type: 'json_object' },
+          }),
+        });
+        const gptJson = await gpt.json();
+        const parsed = JSON.parse(gptJson.choices?.[0]?.message?.content || '{}');
+        const guessedPerson = (name: string) => PEOPLE.find(p => p.first.toLowerCase() === name?.toLowerCase())?.id || me.id;
+        const guessedProj = projects.find(p => p.name.toLowerCase().includes((parsed.project || '').toLowerCase()))?.id || projects[0]?.id || '';
+        draft = { transcript, suggestedProjectId: guessedProj, notes: parsed.notes || [], tasks: (parsed.tasks || []).map((t: { title: string; who: string; hrs: number; due: string }) => ({ ...t, who: guessedPerson(t.who) })) };
+      } catch {
+        transcript = '(Transcription failed — check your API key)';
+        draft = { transcript, suggestedProjectId: projects[0]?.id || '', notes: [], tasks: [] };
+      }
+    } else {
+      // demo mode — simulated output
+      transcript = '[Demo mode] No OpenAI key set. This is a simulated transcript. The team discussed Cedar Point glazing scope, addendum 3 revisions, and assigned follow-up tasks to Eric and Allen.';
+      draft = {
+        transcript,
+        suggestedProjectId: projects[0]?.id || '',
+        notes: [
+          { tag: 'gc', text: 'Cedar Point GC confirmed addendum 3 changes glazing scope on Level 3.' },
+          { tag: 'spec', text: 'Spec section 08 44 13 updated — low-e coating required on all exterior units.' },
+          { tag: 'cost', text: 'Estimate impact from addendum 3 estimated at +$18k.' },
+        ],
+        tasks: [
+          { title: 'Update takeoff for addendum 3 scope changes', who: me.id, hrs: 4, due: 'Mon' },
+          { title: 'Request updated Oldcastle quote with new spec', who: me.id, hrs: 1, due: 'Tue' },
+          { title: 'Review revised drawings and confirm quantity changes', who: me.id, hrs: 3, due: 'Wed' },
+        ],
+      };
+    }
+    setSt(s => ({ ...s, meetingState: 'confirming', meetingDraft: draft }));
+  }
+
+  function confirmAndAdd() {
+    const proj = projects.find(p => p.id === confirmProj);
+    if (!proj) return;
+    const when = new Date().toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    const newNotes: ProjNote[] = editNotes.map(n => ({ who: me.name, when, text: n.text, tag: n.tag, label: n.tag.toUpperCase() }));
+    const newTasks: Task[] = editTasks.map(t => ({
+      id: 'mt' + Date.now() + Math.random().toString(36).slice(2),
+      title: t.title, projectId: confirmProj, who: t.who,
+      status: 'To-Do' as TaskStatus, due: t.due, day: t.due,
+      date: null, hrs: t.hrs, detail: '', notes: [],
+    }));
+    const histEntry = { id: 'mh' + Date.now(), at: Date.now(), source: st.meetingSource, projectId: confirmProj, transcript: st.meetingDraft?.transcript || '', notesAdded: editNotes.length, tasksAdded: editTasks.length };
+    setSt(s => ({
+      ...s,
+      tasks: [...s.tasks, ...newTasks],
+      projNotes: { ...s.projNotes, [confirmProj]: [...(s.projNotes[confirmProj] || []), ...newNotes] },
+      meetingHistory: [histEntry, ...s.meetingHistory],
+      meetingState: 'idle',
+      meetingDraft: null,
+    }));
+    flash(`Added ${editNotes.length} note${editNotes.length !== 1 ? 's' : ''} + ${editTasks.length} task${editTasks.length !== 1 ? 's' : ''} to ${proj.name}`);
+  }
+
+  const fmtElapsed = (s: number) => `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
+
+  const state = st.meetingState;
+  const inp2: React.CSSProperties = { border: '1px solid var(--color-divider)', padding: '6px 8px', font: '400 12px/1 var(--font-body)', background: 'var(--color-bg)', width: '100%', boxSizing: 'border-box' };
+
+  return (
+    <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+      {/* ── left panel: history + key ── */}
+      <div style={{ width: 280, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', background: 'var(--color-neutral-100)', overflow: 'hidden' }}>
+        <div style={{ padding: '14px 16px', borderBottom: '2px solid var(--color-text)' }}>
+          <div style={{ font: '800 15px/1 var(--font-heading)' }}>AI Meeting Notes</div>
+        </div>
+        <div style={{ padding: '10px 16px 6px', font: '600 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-600)' }}>PAST MEETINGS ({st.meetingHistory.length})</div>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {st.meetingHistory.length === 0 && <div style={{ padding: '12px 16px', font: '400 12px/1.5 var(--font-body)', color: 'var(--color-neutral-500)' }}>No recordings yet.</div>}
+          {st.meetingHistory.map(h => {
+            const proj = projects.find(p => p.id === h.projectId);
+            return (
+              <div key={h.id} style={{ padding: '10px 16px', borderBottom: '1px solid var(--color-divider)' }}>
+                <div style={{ font: '600 11.5px/1 var(--font-body)', marginBottom: 3 }}>{proj?.name || h.projectId}</div>
+                <div style={{ font: '400 10.5px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginBottom: 4 }}>{new Date(h.at).toLocaleDateString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} · {h.source}</div>
+                <div style={{ font: '500 10px/1 var(--font-body)', color: 'var(--color-accent)' }}>{h.notesAdded} note{h.notesAdded !== 1 ? 's' : ''} · {h.tasksAdded} task{h.tasksAdded !== 1 ? 's' : ''} added</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── main panel ── */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <ViewHeader title="AI Meeting Notes" me={me} onSignOut={() => {}} />
+
+        {/* IDLE — start screen */}
+        {(state === 'idle' || state === 'prompt') && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 28, padding: 48 }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ font: '800 28px/1.1 var(--font-heading)', marginBottom: 10 }}>Record a meeting</div>
+              <div style={{ font: '400 14px/1.6 var(--font-body)', color: 'var(--color-neutral-600)', maxWidth: 420 }}>Captures your PC audio — works with any meeting app (Teams, Google Meet, Zoom, etc). Transcribes the call and extracts notes and action items for your projects.</div>
+            </div>
+            <button onClick={startRecording} style={{ padding: '16px 36px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 14px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span style={{ fontSize: 20 }}>⏺</span> START RECORDING
+            </button>
+            <div style={{ padding: '10px 18px', background: 'var(--color-neutral-200)', border: '1px solid var(--color-divider)', maxWidth: 420 }}>
+              <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', marginBottom: 5 }}>HOW IT WORKS</div>
+              <div style={{ font: '400 11.5px/1.6 var(--font-body)', color: 'var(--color-neutral-700)' }}>When prompted, select your screen or app window and check <strong>"Share system audio"</strong>. The recording captures everything playing on your PC — your meeting call audio included.</div>
+            </div>
+          </div>
+        )}
+
+        {/* RECORDING */}
+        {state === 'recording' && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 28 }}>
+            <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'var(--color-accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: 'pulse 1.5s infinite' }}>
+              <span style={{ fontSize: 32, color: '#fff' }}>⏺</span>
+            </div>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ font: '800 36px/1 var(--font-heading)', fontVariantNumeric: 'tabular-nums', color: 'var(--color-accent)' }}>{fmtElapsed(elapsed)}</div>
+              <div style={{ font: '500 13px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 8, letterSpacing: '.1em', textTransform: 'uppercase' }}>Recording · System Audio</div>
+            </div>
+            <button onClick={stopRecording} style={{ padding: '13px 32px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 13px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>⏹ STOP &amp; PROCESS</button>
+            <style>{`@keyframes pulse { 0%,100%{box-shadow:0 0 0 0 rgba(236,48,19,.4)} 50%{box-shadow:0 0 0 18px rgba(236,48,19,0)} }`}</style>
+          </div>
+        )}
+
+        {/* PROCESSING */}
+        {state === 'processing' && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 20 }}>
+            <div style={{ font: '800 22px/1 var(--font-heading)' }}>Transcribing &amp; analyzing…</div>
+            <div style={{ font: '400 13px/1.5 var(--font-body)', color: 'var(--color-neutral-600)' }}>Extracting notes and action items from your meeting. This may take a moment.</div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              {[0, 1, 2].map(i => <div key={i} style={{ width: 10, height: 10, background: 'var(--color-accent)', borderRadius: '50%', animation: `bounce 1.2s ${i * 0.2}s infinite` }} />)}
+            </div>
+            <style>{`@keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-10px)} }`}</style>
+          </div>
+        )}
+
+        {/* CONFIRMING */}
+        {state === 'confirming' && st.meetingDraft && (
+          <div style={{ flex: 1, overflowY: 'auto', padding: '28px 32px', display: 'flex', flexDirection: 'column', gap: 24 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+              <div>
+                <div style={{ font: '800 22px/1 var(--font-heading)', marginBottom: 4 }}>Review before adding</div>
+                <div style={{ font: '400 13px/1 var(--font-body)', color: 'var(--color-neutral-600)' }}>Confirm the project, then edit the notes and tasks below before saving.</div>
+              </div>
+              <div style={{ display: 'flex', gap: 10, flexShrink: 0 }}>
+                <button onClick={() => setSt(s => ({ ...s, meetingState: 'idle', meetingDraft: null }))} style={{ padding: '9px 16px', background: 'none', border: '1px solid var(--color-divider)', font: '600 11px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>DISCARD</button>
+                <button onClick={confirmAndAdd} style={{ padding: '9px 20px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>ADD TO PROJECT →</button>
+              </div>
+            </div>
+
+            {/* project selector */}
+            <div style={{ padding: '16px 20px', border: '2px solid var(--color-text)', background: 'var(--color-neutral-100)' }}>
+              <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 10 }}>PROJECT</div>
+              <select value={confirmProj} onChange={e => setConfirmProj(e.target.value)} style={{ ...inp2, font: '600 14px/1 var(--font-body)', padding: '9px 12px' }}>
+                {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+
+            {/* transcript */}
+            <div>
+              <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 8, color: 'var(--color-neutral-600)' }}>TRANSCRIPT</div>
+              <div style={{ padding: '12px 14px', background: 'var(--color-neutral-100)', border: '1px solid var(--color-divider)', font: '400 12px/1.6 var(--font-body)', color: 'var(--color-neutral-700)', maxHeight: 120, overflowY: 'auto' }}>{st.meetingDraft.transcript}</div>
+            </div>
+
+            {/* notes */}
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.14em' }}>NOTES TO ADD ({editNotes.length})</div>
+                <button onClick={() => setEditNotes(n => [...n, { tag: 'spec', text: '' }])} style={{ padding: '4px 10px', background: 'none', border: '1px solid var(--color-divider)', font: '600 10px/1 var(--font-body)', cursor: 'pointer' }}>+ ADD NOTE</button>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {editNotes.map((n, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '10px 12px', border: '1px solid var(--color-divider)', background: 'var(--color-bg)' }}>
+                    <select value={n.tag} onChange={e => setEditNotes(ns => ns.map((x, j) => j === i ? { ...x, tag: e.target.value } : x))} style={{ ...inp2, width: 90, flexShrink: 0 }}>
+                      {['gc', 'spec', 'cost', 'schedule', 'risk', 'other'].map(t => <option key={t} value={t}>{t.toUpperCase()}</option>)}
+                    </select>
+                    <input value={n.text} onChange={e => setEditNotes(ns => ns.map((x, j) => j === i ? { ...x, text: e.target.value } : x))} style={{ ...inp2, flex: 1 }} placeholder="Note text…" />
+                    <button onClick={() => setEditNotes(ns => ns.filter((_, j) => j !== i))} style={{ padding: '6px 8px', background: 'none', border: '1px solid var(--color-divider)', cursor: 'pointer', color: 'var(--color-accent)', font: '700 11px/1 var(--font-body)', flexShrink: 0 }}>✕</button>
+                  </div>
+                ))}
+                {editNotes.length === 0 && <div style={{ font: '400 12px/1 var(--font-body)', color: 'var(--color-neutral-500)', padding: '8px 0' }}>No notes extracted — add one above.</div>}
+              </div>
+            </div>
+
+            {/* tasks */}
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.14em' }}>ACTION ITEMS TO ADD ({editTasks.length})</div>
+                <button onClick={() => setEditTasks(ts => [...ts, { title: '', who: me.id, hrs: 2, due: 'Mon' }])} style={{ padding: '4px 10px', background: 'none', border: '1px solid var(--color-divider)', font: '600 10px/1 var(--font-body)', cursor: 'pointer' }}>+ ADD TASK</button>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {editTasks.map((t, i) => (
+                  <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 120px 60px 80px 32px', gap: 8, alignItems: 'center', padding: '10px 12px', border: '1px solid var(--color-divider)', background: 'var(--color-bg)' }}>
+                    <input value={t.title} onChange={e => setEditTasks(ts => ts.map((x, j) => j === i ? { ...x, title: e.target.value } : x))} style={inp2} placeholder="Task title…" />
+                    <select value={t.who} onChange={e => setEditTasks(ts => ts.map((x, j) => j === i ? { ...x, who: e.target.value } : x))} style={inp2}>
+                      {PEOPLE.filter(p => p.kind === 'estimator' || p.kind === 'manager').map(p => <option key={p.id} value={p.id}>{p.first}</option>)}
+                    </select>
+                    <input value={t.hrs} type="number" min={0.5} step={0.5} onChange={e => setEditTasks(ts => ts.map((x, j) => j === i ? { ...x, hrs: parseFloat(e.target.value) || 1 } : x))} style={{ ...inp2, textAlign: 'center' }} />
+                    <input value={t.due} onChange={e => setEditTasks(ts => ts.map((x, j) => j === i ? { ...x, due: e.target.value } : x))} style={inp2} placeholder="Mon" />
+                    <button onClick={() => setEditTasks(ts => ts.filter((_, j) => j !== i))} style={{ padding: '6px 8px', background: 'none', border: '1px solid var(--color-divider)', cursor: 'pointer', color: 'var(--color-accent)', font: '700 11px/1 var(--font-body)' }}>✕</button>
+                  </div>
+                ))}
+                {editTasks.length === 0 && <div style={{ font: '400 12px/1 var(--font-body)', color: 'var(--color-neutral-500)', padding: '8px 0' }}>No action items extracted — add one above.</div>}
+              </div>
+            </div>
+
+            <button onClick={confirmAndAdd} style={{ padding: '14px 28px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 13px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer', alignSelf: 'flex-start' }}>
+              ADD TO PROJECT →
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TeamConnectionView({ st, setSt, me, isManager }: {
   st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person; isManager: boolean;
 }) {
@@ -2712,10 +3031,37 @@ function TeamConnectionView({ st, setSt, me, isManager }: {
 
   const timeStr = (at: number) => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
+  const myStatus: MemberStatus = (st.memberStatuses[userId] as MemberStatus) || 'available';
+  const myStatusOpt = STATUS_OPTIONS.find(o => o.value === myStatus)!;
+
+  function getPersonStatus(personId: string): typeof STATUS_OPTIONS[0] {
+    const s = (st.memberStatuses[personId] as MemberStatus) || 'available';
+    return STATUS_OPTIONS.find(o => o.value === s)!;
+  }
+
   return (
     <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
       {/* rail */}
       <div style={{ width: 290, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', overflowY: 'auto', background: 'var(--color-bg)' }}>
+
+        {/* ── MY STATUS ── */}
+        <div style={{ padding: '12px 14px', borderBottom: '2px solid var(--color-text)', background: 'var(--color-neutral-100)', flexShrink: 0 }}>
+          <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-600)', marginBottom: 8 }}>MY STATUS</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <div style={{ width: 10, height: 10, borderRadius: '50%', background: myStatusOpt.dot, flexShrink: 0, boxShadow: '0 0 0 2px ' + myStatusOpt.dot + '44' }} />
+            <div style={{ font: '700 12px/1 var(--font-body)', color: myStatusOpt.color }}>{myStatusOpt.label}</div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+            {STATUS_OPTIONS.map(opt => (
+              <button key={opt.value} onClick={() => setSt(s => ({ ...s, memberStatuses: { ...s.memberStatuses, [userId]: opt.value } }))}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 8px', border: myStatus === opt.value ? '1.5px solid ' + opt.color : '1px solid var(--color-divider)', background: myStatus === opt.value ? opt.color + '18' : 'transparent', cursor: 'pointer', textAlign: 'left' }}>
+                <div style={{ width: 7, height: 7, borderRadius: '50%', background: opt.dot, flexShrink: 0 }} />
+                <span style={{ font: myStatus === opt.value ? '700 10px/1 var(--font-body)' : '500 10px/1 var(--font-body)', color: myStatus === opt.value ? opt.color : 'var(--color-neutral-700)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{opt.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {rail.map(group => (
           <div key={group.header}>
             <div style={{ padding: '8px 14px 5px', font: '600 10px/1 var(--font-body)', letterSpacing: '.16em', color: 'var(--color-neutral-600)', background: 'var(--color-neutral-100)', borderBottom: '1px solid var(--color-divider)', borderTop: '2px solid var(--color-text)' }}>
@@ -2724,13 +3070,23 @@ function TeamConnectionView({ st, setSt, me, isManager }: {
             {group.rows.map(row => {
               const active = sel === row.key;
               const unread = isUnread(row.key);
+              const rowPerson = !row.key.startsWith('ch:') ? PEOPLE.find(p => { const ids = row.key.split('~'); return ids.includes(p.id) && p.id !== userId; }) : undefined;
+              const personStatus = rowPerson ? getPersonStatus(rowPerson.id) : null;
               return (
                 <button key={row.key} onClick={() => selectConvo(row.key)} style={{ width: '100%', display: 'flex', alignItems: 'flex-start', gap: 10, padding: '9px 14px', borderBottom: '1px solid var(--color-divider)', background: active ? 'var(--color-text)' : 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left' }}>
-                  <div style={{ width: 30, height: 30, background: active ? 'var(--color-accent)' : 'var(--color-neutral-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 10px/1 var(--font-body)', flexShrink: 0, color: active ? '#fff' : 'var(--color-text)' }}>
-                    {row.key.startsWith('ch:') ? '#' : PEOPLE.find(p => { const ids = row.key.split('~'); return ids.includes(p.id) && p.id !== userId; })?.initials || '?'}
+                  <div style={{ position: 'relative', flexShrink: 0 }}>
+                    <div style={{ width: 30, height: 30, background: active ? 'var(--color-accent)' : 'var(--color-neutral-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 10px/1 var(--font-body)', color: active ? '#fff' : 'var(--color-text)' }}>
+                      {row.key.startsWith('ch:') ? '#' : rowPerson?.initials || '?'}
+                    </div>
+                    {personStatus && (
+                      <div style={{ position: 'absolute', bottom: -2, right: -2, width: 9, height: 9, borderRadius: '50%', background: personStatus.dot, border: '1.5px solid var(--color-bg)' }} />
+                    )}
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ font: '600 12px/1 var(--font-body)', color: active ? '#fff' : 'var(--color-text)', marginBottom: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.name}</div>
+                    {personStatus && (
+                      <div style={{ font: '500 10px/1 var(--font-body)', color: active ? 'rgba(255,255,255,.55)' : personStatus.color, marginBottom: 2 }}>{personStatus.label}</div>
+                    )}
                     <div style={{ font: '400 10.5px/1.3 var(--font-body)', color: active ? 'rgba(255,255,255,.65)' : 'var(--color-neutral-600)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.sub}</div>
                     {row.members && <div style={{ font: '400 9.5px/1 var(--font-body)', color: active ? 'rgba(255,255,255,.4)' : 'var(--color-neutral-400)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.members.join(' · ')}</div>}
                   </div>
@@ -2750,7 +3106,15 @@ function TeamConnectionView({ st, setSt, me, isManager }: {
             {selName.isGroup ? '#' : selPerson?.initials || '?'}
           </div>
           <div style={{ flex: 1 }}>
-            <div style={{ font: '800 18px/1 var(--font-heading)' }}>{selName.name}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ font: '800 18px/1 var(--font-heading)' }}>{selName.name}</div>
+              {selPerson && (() => { const ps = getPersonStatus(selPerson.id); return (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '3px 8px', background: ps.color + '18', border: '1px solid ' + ps.color + '55' }}>
+                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: ps.dot }} />
+                  <span style={{ font: '600 10px/1 var(--font-body)', color: ps.color }}>{ps.label}</span>
+                </div>
+              ); })()}
+            </div>
             <div style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 3 }}>
               {selName.isGroup ? `${selName.members?.length || 0} people · group chat` : selPerson ? `${selPerson.role} · ${selPerson.email}` : ''}
             </div>
