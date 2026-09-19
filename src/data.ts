@@ -10,13 +10,23 @@ export function emptyGc(): GcEntry {
   return { company: '', location: '', contactName: '', contactTitle: '', contactEmail: '', contactPhone: '' };
 }
 
+export type BidTypeBid = 'Negotiated' | 'Hard Bid' | 'Design-Build' | 'CM at Risk' | 'Other';
+export type BidWorkType = 'Curtain Wall' | 'Storefront' | 'Window Wall' | 'Entrances & Doors' | 'Skylights' | 'Glass Partitions' | 'ACM / Cladding' | 'Mixed Scope' | 'Other';
+export type BidBuildingType = 'Office' | 'Healthcare' | 'Education' | 'Hospitality' | 'Retail' | 'Industrial' | 'Multi-Family Residential' | 'Mixed-Use' | 'Government' | 'Data Center' | 'Other';
+export type BidTypeConstruction = 'New Construction' | 'Renovation' | 'Upfit' | 'Other';
+export type BidOffice = 'Charlotte' | 'Atlanta' | 'Charleston';
+export type BidClientTier = '1' | '2' | '3' | '4';
+
 export interface BidProject {
   id: string; name: string;
   gc: string; // legacy / primary GC company name for display
   gcs: GcEntry[]; // up to 4 GCs with full contact info
   bidDate: string;
   level: string; location: string; scope: string;
-  planRoom: string; info: string; notes: string;
+  planRoom: string; planLinks?: string[]; info: string; notes: string;
+  followUpDate?: string; // manual override; if absent, computed as bidDate + 14d
+  price?: string; cost?: string; // current proposal sell price and estimated cost
+  revisions?: Revision[];
   status: BidStatus; assignees: string[];
   declineReason: string; declineNote: string;
   reviewReason: string;
@@ -24,6 +34,15 @@ export interface BidProject {
   archived?: boolean; archivedAt?: string;
   entryDate?: string; assignedDate?: string;
   jobSize?: 'large' | 'medium' | 'small';
+  // new structured fields
+  typeBid?: BidTypeBid;
+  workType?: BidWorkType;
+  buildingType?: BidBuildingType;
+  typeConstruction?: BidTypeConstruction;
+  office?: BidOffice;
+  clientTier?: BidClientTier;
+  manager?: string;
+  bd?: string;
 }
 
 export const BID_LEVELS = ['100% CD', '90% CD', '75% DD', '50% DD', '100% CD + Add. 3', 'N/A'];
@@ -42,10 +61,12 @@ export interface Project {
   location: string; glazier: string; sqft: string; trade?: 'glass' | 'acm';
   gc?: string; gcContacts?: GcContact[]; drawings?: string;
 }
+export type TimeBlock = 'morning' | 'afternoon';
 export interface Task {
   id: string; title: string; projectId: string; who: string;
   status: TaskStatus; due: string; day: string; date: string | null;
   hrs: number; detail: string; notes: NoteEntry[];
+  timeBlock?: TimeBlock; // 'morning' = 8–12, 'afternoon' = 1–5
 }
 export interface NoteEntry { who: string; when: string; text: string; }
 export interface Revision { rev: string; label: string; price: string; cost: string; when: string; who: string; note: string; }
@@ -65,10 +86,53 @@ export const PEOPLE: Person[] = [
   { id: 'nico',  name: 'Nico Goenaga',         first: 'Nico',  role: 'Estimator',               initials: 'NG', email: 'NicolasGoenaga@Glass1st.net',         kind: 'estimator', mgr: 'blake' },
   { id: 'eric',  name: 'Eric Lunsford',        first: 'Eric',  role: 'Estimator',               initials: 'EL', email: 'EricLunsford@Glass1st.net',           kind: 'estimator', mgr: 'luis' },
   { id: 'timp',  name: 'Tim Prewett',          first: 'Tim',   role: 'Cladding Estimator',      initials: 'TP', email: 'timprewett@glass1st.net',             kind: 'estimator', mgr: 'chris' },
-  { id: 'ray',   name: 'Ray Herring',          first: 'Ray',   role: 'Estimating Director',     initials: 'RH', email: 'RayHerring@Glass1st.net',             kind: 'exec',      mgr: null },
+  { id: 'ray',   name: 'Ray Herring',          first: 'Ray',   role: 'Estimating Director',     initials: 'RH', email: 'RayHerring@Glass1st.net',             kind: 'manager',   mgr: 'paul' },
   { id: 'lucas', name: 'Lucas Braswell',       first: 'Lucas', role: 'Project Developer',        initials: 'LB', email: 'LucasBraswell@Glass1st.net',          kind: 'estimator', mgr: 'paul' },
   { id: 'justin',name: 'Justin Campana',       first: 'Justin',role: 'Project Developer',        initials: 'JC', email: 'JustinCampana@Glass1st.net',          kind: 'estimator', mgr: 'paul' },
+  { id: 'kris',  name: 'Kris Tripp',           first: 'Kris',  role: 'Business Development',     initials: 'KT', email: 'KrisTripp@Glass1st.net',              kind: 'estimator', mgr: 'paul' },
 ];
+
+// Manager IDs allowed for bid/CRM manager assignment
+export const MANAGER_IDS = ['ray', 'paul', 'blake', 'luis'];
+
+// BD team for bid board and CRM (shared list)
+export const BD_TEAM = [
+  { id: '', name: 'Open / Unassigned' },
+  { id: 'john', name: 'John DiPaolo' },
+  { id: 'danielle', name: 'Danielle Benfield' },
+  { id: 'jaramia', name: 'Jaramia Staumpf' },
+  { id: 'newguy', name: 'New Guy' },
+];
+
+// Office assignment logic
+const OFFICE_COORDS: Record<string, { lat: number; lng: number }> = {
+  Charlotte:  { lat: 35.2271, lng: -80.8431 },
+  Atlanta:    { lat: 33.7490, lng: -84.3880 },
+  Charleston: { lat: 32.7765, lng: -79.9311 },
+};
+const STATE_TO_OFFICE: Record<string, 'Charlotte' | 'Atlanta' | 'Charleston'> = {
+  NC: 'Charlotte', VA: 'Charlotte', SC: 'Charleston',
+  GA: 'Atlanta', AL: 'Atlanta', TN: 'Atlanta', MS: 'Atlanta', FL: 'Atlanta',
+};
+
+function degToRad(d: number) { return d * Math.PI / 180; }
+function haversineMiles(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 3958.8;
+  const dLat = degToRad(lat2 - lat1), dLng = degToRad(lng2 - lng1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(degToRad(lat1)) * Math.cos(degToRad(lat2)) * Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+export function inferOffice(location: string): BidOffice | undefined {
+  if (!location) return undefined;
+  // Extract state abbreviation
+  const stateMatch = location.match(/,\s*([A-Z]{2})\s*$/);
+  if (stateMatch) {
+    const st = stateMatch[1];
+    if (STATE_TO_OFFICE[st]) return STATE_TO_OFFICE[st] as BidOffice;
+  }
+  return undefined;
+}
 
 export const PROJECTS: Project[] = [
   {
@@ -332,55 +396,137 @@ export const INITIAL_BID_PROJECTS: BidProject[] = [
   {
     id: 'bp1', name: 'Apex Tower Phase 1 — Curtain Wall', gc: 'Turner Construction',
     gcs: [{ company: 'Turner Construction', location: 'Charlotte, NC', contactName: 'Mark Connelly', contactTitle: 'Project Manager', contactEmail: 'mconnelly@tcco.com', contactPhone: '704-555-0182' }],
-    bidDate: 'Sep 20', level: '100% CD', location: 'Charlotte, NC',
+    bidDate: '2026-09-20', level: '100% CD', location: 'Charlotte, NC',
     scope: 'Curtain wall, unitized system, 34,000 sf', planRoom: 'https://planroom.turner.com/apex',
     info: 'Full curtain wall envelope for a 22-story mixed-use tower. Unitized system preferred. Alternate for BIPV glazing on south face.',
     notes: 'Turner rep is Mark Connelly — strong relationship. Seen this GC 3x this year.',
-    status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false,
+    status: 'pending', assignees: ['allen'], declineReason: '', declineNote: '', reviewReason: '', notified: false,
+    bd: 'john', manager: 'blake', typeBid: 'Hard Bid', workType: 'Curtain Wall', buildingType: 'Office', typeConstruction: 'New Construction', office: 'Charlotte', clientTier: '1', jobSize: 'large',
+    price: '4850000', cost: '3720000',
+    revisions: [
+      { rev: 'R0', label: 'Base bid', price: '5100000', cost: '3920000', when: 'Sep 10 · 2:15 PM', who: 'Allen Poole', note: 'Initial takeoff from 100% CD set. Includes unitized system with standard IGU.' },
+      { rev: 'R1', label: 'VE Alternate', price: '4850000', cost: '3720000', when: 'Sep 14 · 10:30 AM', who: 'Allen Poole', note: 'VE alternate — removed BIPV south face, substituted standard spandrel glazing.' },
+    ],
   },
   {
     id: 'bp2', name: 'Lakefront Civic Center', gc: 'Brasfield & Gorrie',
     gcs: [{ company: 'Brasfield & Gorrie', location: 'Columbia, SC', contactName: 'Sandra Park', contactTitle: 'Estimator', contactEmail: 'spark@bg.com', contactPhone: '803-555-0244' }],
-    bidDate: 'Sep 15', level: '90% CD', location: 'Columbia, SC',
+    bidDate: '2026-09-28', level: '90% CD', location: 'Columbia, SC',
     scope: 'Storefront, skylights, decorative glass partitions', planRoom: '',
     info: 'New civic building for the City of Columbia. Storefront on three facades plus a 1,200 sf skylight over the atrium.',
     notes: 'Need to confirm if the skylight is structural or just glazing.',
-    status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false,
+    status: 'pending', assignees: ['nico'], declineReason: '', declineNote: '', reviewReason: '', notified: false,
+    bd: 'danielle', manager: 'paul', typeBid: 'Hard Bid', workType: 'Storefront', buildingType: 'Government', typeConstruction: 'New Construction', office: 'Charlotte', clientTier: '2', jobSize: 'medium',
+    price: '1240000', cost: '965000',
+    revisions: [
+      { rev: 'R0', label: 'Base bid', price: '1240000', cost: '965000', when: 'Sep 15 · 9:00 AM', who: 'Nico Goenaga', note: 'Storefront and skylight scope from 90% CD drawings.' },
+    ],
   },
   {
     id: 'bp3', name: 'Meridian Medical Pavilion', gc: 'Skanska USA',
     gcs: [{ company: 'Skanska USA', location: 'Raleigh, NC', contactName: 'Tom Reyes', contactTitle: 'VP PreCon', contactEmail: 'treyes@skanska.com', contactPhone: '919-555-0371' }],
-    bidDate: 'Sep 12', level: '75% DD', location: 'Raleigh, NC',
+    bidDate: '2026-10-05', level: '75% DD', location: 'Raleigh, NC',
     scope: 'Window wall replacement, 18,500 sf', planRoom: 'https://skanska.buildingconnected.com/m42',
     info: 'Full window wall replacement on an occupied hospital pavilion. Phased install — must coordinate with infection control.',
     notes: 'DDs only so scope has risk. Price with exclusions.',
-    status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false,
+    status: 'review', assignees: ['eric'], declineReason: '', declineNote: '', reviewReason: 'Deeper dive needed', notified: false,
+    bd: 'jaramia', manager: 'ray', typeBid: 'Negotiated', workType: 'Window Wall', buildingType: 'Healthcare', typeConstruction: 'Renovation', office: 'Charlotte', clientTier: '1', jobSize: 'large',
+    price: '2750000', cost: '2180000',
+    revisions: [
+      { rev: 'R0', label: 'Budget number', price: '3100000', cost: '2450000', when: 'Sep 12 · 11:20 AM', who: 'Eric Lunsford', note: 'DD-level budget. Carries design contingency — scope unclear at mullion conditions.' },
+      { rev: 'R1', label: 'Scope reduction', price: '2750000', cost: '2180000', when: 'Sep 18 · 3:45 PM', who: 'Eric Lunsford', note: 'Removed Phase 3 wing from scope per Skanska clarification. Exclusion list updated.' },
+    ],
   },
   {
     id: 'bp4', name: 'Hartwell Office Complex — Bldg A', gc: 'Batson-Cook',
     gcs: [{ company: 'Batson-Cook', location: 'Greenville, SC', contactName: 'Dale Fuqua', contactTitle: 'Senior Estimator', contactEmail: 'dfuqua@batson-cook.com', contactPhone: '864-555-0119' }],
-    bidDate: 'Sep 05', level: '100% CD', location: 'Greenville, SC',
+    bidDate: '2026-09-05', level: '100% CD', location: 'Greenville, SC',
     scope: 'Curtain wall + aluminum entrances, 9,800 sf', planRoom: '',
     info: 'Four-story Class A office. Standard pressure-glazed curtain wall with punched aluminum entrances at two lobby entries.',
     notes: 'Assigned to Allen. Batson-Cook wants number by noon.',
     status: 'accepted', assignees: ['allen'], declineReason: '', declineNote: '', reviewReason: '', notified: true,
+    bd: 'john', manager: 'blake', typeBid: 'Hard Bid', workType: 'Curtain Wall', buildingType: 'Office', typeConstruction: 'New Construction', office: 'Atlanta', clientTier: '2', jobSize: 'medium',
+    price: '1580000', cost: '1220000',
+    revisions: [
+      { rev: 'R0', label: 'Base bid', price: '1580000', cost: '1220000', when: 'Aug 28 · 8:55 AM', who: 'Allen Poole', note: 'Final number submitted. Accepted by Batson-Cook.' },
+    ],
   },
   {
     id: 'bp5', name: 'Pinehurst Resort Expansion', gc: 'Ryan Companies',
     gcs: [{ company: 'Ryan Companies', location: 'Pinehurst, NC', contactName: 'Casey Morton', contactTitle: 'Project Engineer', contactEmail: 'cmorton@ryancompanies.com', contactPhone: '910-555-0067' }],
-    bidDate: 'Sep 08', level: '100% CD + Add. 3', location: 'Pinehurst, NC',
+    bidDate: '2026-09-08', level: '100% CD + Add. 3', location: 'Pinehurst, NC',
     scope: 'Vinyl windows, sliders, glass railings — resort residential', planRoom: '',
     info: 'Phase 2 resort expansion — 48 villa units. Vinyl windows and sliders per unit type, plus glass railing on all decks.',
     notes: 'Nico has the unit matrix from Phase 1.',
     status: 'accepted', assignees: ['nico'], declineReason: '', declineNote: '', reviewReason: '', notified: true,
+    bd: 'danielle', manager: 'paul', typeBid: 'Negotiated', workType: 'Mixed Scope', buildingType: 'Hospitality', typeConstruction: 'New Construction', office: 'Charlotte', clientTier: '3', jobSize: 'medium',
+    price: '895000', cost: '698000',
+    revisions: [
+      { rev: 'R0', label: 'Phase 1 scope', price: '620000', cost: '485000', when: 'Aug 15 · 1:10 PM', who: 'Nico Goenaga', note: 'Phase 1 villas only — 24 units.' },
+      { rev: 'R1', label: 'Phase 2 added', price: '895000', cost: '698000', when: 'Sep 02 · 4:00 PM', who: 'Nico Goenaga', note: 'Added Phase 2 villa units and all deck glass railings.' },
+    ],
   },
   {
     id: 'bp6', name: 'Blue Ridge Data Center', gc: 'McCarthy Building Companies',
     gcs: [{ company: 'McCarthy Building Companies', location: 'Asheville, NC', contactName: '', contactTitle: '', contactEmail: '', contactPhone: '' }],
-    bidDate: 'Sep 03', level: '90% CD', location: 'Asheville, NC',
+    bidDate: '2026-09-03', level: '90% CD', location: 'Asheville, NC',
     scope: 'Blast-rated storefront and security glazing', planRoom: '',
     info: 'Secure data center facility. All glazing must meet blast and forced-entry ratings. Specialty scope.',
     notes: 'Outside our normal trade — we do not carry blast-rated product lines.',
     status: 'declined', assignees: [], declineReason: 'Scope outside our trade', declineNote: 'We do not stock or fabricate blast-rated glazing systems. Recommend passing to a security glazing sub.', reviewReason: '', notified: false,
+    bd: 'jaramia', manager: 'blake', typeBid: 'Hard Bid', workType: 'Storefront', buildingType: 'Data Center', typeConstruction: 'New Construction', office: 'Atlanta', clientTier: '4', jobSize: 'small',
+  },
+  {
+    id: 'bp7', name: 'Novant Ballantyne MOB', gc: 'Choate Construction',
+    gcs: [{ company: 'Choate Construction', location: 'Charlotte, NC', contactName: 'Pam Hicks', contactTitle: 'Preconstruction Manager', contactEmail: 'phicks@choateco.com', contactPhone: '704-555-0291' }],
+    bidDate: '2026-10-12', level: '100% CD', location: 'Charlotte, NC',
+    scope: 'Storefront & automatic entrances, 3-story medical office', planRoom: '',
+    info: 'Full storefront package on all four elevations. Automatic sliding doors at two entrances per healthcare code.',
+    notes: 'Strong relationship via John — expedite review.',
+    status: 'pending', assignees: ['eric'], declineReason: '', declineNote: '', reviewReason: '', notified: false,
+    bd: 'john', manager: 'blake', typeBid: 'Hard Bid', workType: 'Storefront', buildingType: 'Healthcare', typeConstruction: 'New Construction', office: 'Charlotte', clientTier: '1', jobSize: 'medium',
+    price: '780000', cost: '605000',
+    revisions: [
+      { rev: 'R0', label: 'Base bid', price: '780000', cost: '605000', when: 'Sep 30 · 9:15 AM', who: 'Eric Lunsford', note: 'Full storefront package with automatic doors at two entries.' },
+    ],
+  },
+  {
+    id: 'bp8', name: 'Emory University Science Annex', gc: 'DPR Construction',
+    gcs: [{ company: 'DPR Construction', location: 'Atlanta, GA', contactName: 'Reggie Okafor', contactTitle: 'Project Executive', contactEmail: 'rokafor@dpr.com', contactPhone: '404-555-0348' }],
+    bidDate: '2026-10-18', level: '100% CD', location: 'Atlanta, GA',
+    scope: 'Full glazing — 6-story science building, LEED Gold', planRoom: 'https://dpr.buildingconnected.com/emory',
+    info: 'Full curtain wall and storefront package. LEED Gold target requires high-performance glazing throughout. Value engineering alternate requested.',
+    notes: 'Price is tight — VE curtain wall from thermally broken to standard system for alternate.',
+    status: 'pending', assignees: ['nico'], declineReason: '', declineNote: '', reviewReason: '', notified: false,
+    bd: 'danielle', manager: 'paul', typeBid: 'Hard Bid', workType: 'Curtain Wall', buildingType: 'Education', typeConstruction: 'New Construction', office: 'Atlanta', clientTier: '1', jobSize: 'large',
+    price: '3420000', cost: '2680000',
+    revisions: [
+      { rev: 'R0', label: 'Base bid', price: '3820000', cost: '2990000', when: 'Oct 05 · 8:30 AM', who: 'Nico Goenaga', note: 'Full curtain wall + storefront per 100% CDs. Thermally broken system throughout.' },
+      { rev: 'R1', label: 'VE Alternate — std system', price: '3420000', cost: '2680000', when: 'Oct 10 · 2:00 PM', who: 'Nico Goenaga', note: 'VE alternate: standard (non-thermally broken) system on non-critical elevations.' },
+    ],
+  },
+  {
+    id: 'bp9', name: 'Vanderbilt Med Center Tower', gc: 'Skanska USA',
+    gcs: [{ company: 'Skanska USA', location: 'Nashville, TN', contactName: 'Leo Hartmann', contactTitle: 'Senior PM', contactEmail: 'lhartmann@skanska.com', contactPhone: '615-555-0419' }],
+    bidDate: '2026-10-02', level: '100% CD', location: 'Nashville, TN',
+    scope: 'Unitized curtain wall, 22-story patient tower', planRoom: 'https://skanska.buildingconnected.com/vandy',
+    info: 'Major hospital patient tower. Unitized system — slab edge conditions need field verification. Coordination with MEP at every floor.',
+    notes: 'Unitized system quote from OBE in hand. Need to confirm slab edge conditions with structural.',
+    status: 'pending', assignees: ['allen'], declineReason: '', declineNote: '', reviewReason: '', notified: false,
+    bd: 'jaramia', manager: 'ray', typeBid: 'Hard Bid', workType: 'Curtain Wall', buildingType: 'Healthcare', typeConstruction: 'New Construction', office: 'Atlanta', clientTier: '1', jobSize: 'large',
+    price: '6100000', cost: '4740000',
+    revisions: [
+      { rev: 'R0', label: 'Base bid', price: '6100000', cost: '4740000', when: 'Sep 22 · 11:45 AM', who: 'Allen Poole', note: 'Unitized system, 22-story. OBE quote included. Slab edge TBD — contingency in cost.' },
+    ],
+  },
+  {
+    id: 'bp10', name: 'Columbia Convention Center Expansion', gc: 'Barton Malow',
+    gcs: [{ company: 'Barton Malow', location: 'Columbia, SC', contactName: 'Derek Stiles', contactTitle: 'Estimator', contactEmail: 'dstiles@bartonmalow.com', contactPhone: '803-555-0512' }],
+    bidDate: '2026-11-01', level: '90% CD', location: 'Columbia, SC',
+    scope: 'Curtain wall & ribbon windows, convention hall addition', planRoom: '',
+    info: 'Phase 2 expansion of existing convention center. Large ribbon window system on new hall — coordinate with existing structure tie-ins.',
+    notes: 'First contact made — good intro from Jaramia. Relationship building phase.',
+    status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false,
+    bd: 'newguy', manager: 'paul', typeBid: 'Hard Bid', workType: 'Curtain Wall', buildingType: 'Government', typeConstruction: 'New Construction', office: 'Charlotte', clientTier: '3', jobSize: 'large',
   },
 ];

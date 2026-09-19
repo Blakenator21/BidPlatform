@@ -2,12 +2,13 @@ import React, { useState, useRef, useEffect } from 'react';
 import ReactDOM from 'react-dom';
 import {
   PEOPLE, PROJECTS, mkTasks, INITIAL_REVISIONS, INITIAL_DEALS,
+  MANAGER_IDS, BD_TEAM, inferOffice,
   NOTE_TAGS, WEEKDAY_LABELS,
   INITIAL_BID_PROJECTS, BID_LEVELS, DECLINE_REASONS,
   money, num, gpPct, gpNum, statusColor, statusShort, personName, personFirst, personInitials,
   taskDate, seedShiftDate, ymd, prettyShort, mondayOf, addDays,
   emptyGc,
-  type Task, type TaskStatus, type Deal, type Revision,
+  type Task, type TaskStatus, type TimeBlock, type Deal, type Revision,
   type FollowUp, type NoteEntry, type Person, type Project, type BidProject, type BidStatus, type GcEntry,
 } from './data';
 import { Button, Seg, Chip, StatusLight, KpiStrip, ListRow, Field, PageHeader, Rule, T, STATUS, inputStyle, type StatusKey } from './design/ui';
@@ -47,10 +48,38 @@ function dueColor(t: Task): string {
 const inp = inputStyle;
 
 // ─── types ────────────────────────────────────────────────────────────────────
-type View = 'myday' | 'overview' | 'calendar' | 'capacity' | 'teamcapacity' | 'projects' | 'teamconnection' | 'resources' | 'meetings';
-type AppTab = 'board' | 'tracker';
+type View = 'myday' | 'overview' | 'calendar' | 'capacity' | 'teamcapacity' | 'projects' | 'teamconnection' | 'resources' | 'meetings' | 'vendors';
+type AppTab = 'board' | 'tracker' | 'teamconnection' | 'resources' | 'vendors' | 'companies' | 'bizdev';
+type BdRep = 'john' | 'danielle' | 'jaramia' | 'newguy' | 'hot';
+type BdSubTab = 'projects' | 'ainotes' | 'calendar';
+
+interface BdCalendarEvent { id: string; title: string; date: string; time: string; note: string; }
+// BdProject is now a lightweight overlay — the real data lives in BidProject
+interface BdAiNote { id: string; bidId: string; text: string; by: string; at: string; }
+interface BdMeetingDraft { transcript: string; notes: string[]; repId: BdRep; }
+type BdMeetingState = 'idle' | 'recording' | 'processing' | 'confirming';
 type IssueRecord = { id: string; taskId: string; from: string; text: string; when: string; status: 'open' | 'resolved'; replies: NoteEntry[]; };
 type ProjNote = NoteEntry & { tag: string; label: string; };
+
+// ─── Company Contacts data types ──────────────────────────────────────────────
+interface CrmOffice {
+  id: string; label: string; // e.g. "Charlotte HQ", "Atlanta Office"
+  address: string; phone: string; email: string;
+}
+interface CrmContact {
+  id: string; name: string; title: string;
+  email: string; phone: string; officeId: string;
+}
+interface CrmCompanyNote {
+  id: string; text: string; by: string; at: string;
+}
+interface CrmCompany {
+  id: string; name: string; logo?: string; website?: string;
+  tier?: string; // '1'|'2'|'3'|'4'
+  offices: CrmOffice[];
+  contacts: CrmContact[];
+  notes: CrmCompanyNote[];
+}
 
 interface AppState {
   userId: string; app: AppTab; view: View;
@@ -89,13 +118,31 @@ interface AppState {
   resProcessReader: string | null;
   resTrainingFilter: string;
   resAddingResource: boolean;
+  resShowAddVendor: boolean;
+  resEditVendorId: string | null;
   resVideoOpen: string | null;
   customTrainingTypes: string[];
   userTrainingVideos: Array<{ id: string; type: string; title: string; length: string; description: string; videoUrl: string; videoObjectUrl?: string; }>;
   userProcesses: Array<{ id: string; kind: 'PDF' | 'DOCX' | 'OTHER'; title: string; owner: string; summary: string; fileUrl?: string; fileName?: string; sections: Array<{ heading: string; body: string }> }>;
-  userVendors: Array<{ id: string; name: string; trade: string; about: string; leadTime: string; quoteTurnaround: string; terms: string; contacts: Array<{ name: string; role: string; phone: string; email: string }> }>;
+  userVendors: Vendor[];
   customVendorTrades: string[];
   userTools: Array<{ id: string; name: string; kind: string; note: string; fileUrl?: string; fileName?: string; meta: string; training: string[] }>;
+  projViewTab: 'projects' | 'companies';
+  selectedCompany: string | null;
+  companyFollowUps: Record<string, Array<{ id: string; date: string; note: string; by: string; done: boolean; nextAction: string; }>>;
+  // Company Contacts tab
+  crmCompanies: CrmCompany[];
+  crmSelectedCompany: string | null;
+  crmCompanyTab: 'info' | 'projects' | 'contacts' | 'notes' | 'analytics';
+  crmSelectedBid: string | null;
+  // Business Development tab
+  bdRep: BdRep;
+  bdSubTab: BdSubTab;
+  bdSelectedProject: string | null; // BidProject id
+  bdAiNotes: BdAiNote[];
+  bdCalendar: Record<BdRep, BdCalendarEvent[]>;
+  bdMeetingState: BdMeetingState;
+  bdMeetingDraft: BdMeetingDraft | null;
   memberStatuses: Record<string, MemberStatus>;
   meetingState: 'idle' | 'prompt' | 'recording' | 'processing' | 'confirming';
   meetingSource: string;
@@ -181,6 +228,8 @@ function initState(userId: string): AppState {
     resProcessReader: null,
     resTrainingFilter: 'All training',
     resAddingResource: false,
+    resShowAddVendor: false,
+    resEditVendorId: null,
     resVideoOpen: null,
     customTrainingTypes: [],
     userTrainingVideos: [],
@@ -188,6 +237,20 @@ function initState(userId: string): AppState {
     userVendors: [],
     userTools: [],
     customVendorTrades: [],
+    projViewTab: 'projects',
+    selectedCompany: null,
+    companyFollowUps: {},
+    crmCompanies: [],
+    crmSelectedCompany: null,
+    crmCompanyTab: 'info',
+    crmSelectedBid: null,
+    bdRep: 'john',
+    bdSubTab: 'projects',
+    bdSelectedProject: null,
+    bdAiNotes: [],
+    bdCalendar: { john: [], danielle: [], jaramia: [], newguy: [], hot: [] },
+    bdMeetingState: 'idle',
+    bdMeetingDraft: null,
     memberStatuses: {},
     meetingState: 'idle',
     meetingSource: 'manual',
@@ -214,6 +277,8 @@ const emptyDraft = (): Partial<BidProject> => ({
   scope: '', planRoom: '', info: '', notes: '',
   status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false,
   archived: false,
+  typeBid: undefined, workType: undefined, buildingType: undefined, typeConstruction: undefined,
+  office: undefined, clientTier: undefined, manager: undefined, bd: undefined,
 });
 
 function BidBoardView({ st, setSt, me, flash, onSignOut }: {
@@ -414,10 +479,11 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
     if (!draft.jobSize) { flash('Select a job size (Large / Medium / Small)'); return; }
     const gcs = (draft.gcs && draft.gcs.length > 0) ? draft.gcs : [emptyGc()];
     const gc = gcs[0]?.company || draft.gc || '';
+    const office = draft.office || inferOffice(draft.location || '') || undefined;
     if (editBid) {
-      patchBid(editBid.id, { ...draft, gcs, gc });
+      patchBid(editBid.id, { ...draft, gcs, gc, office });
     } else {
-      const nb: BidProject = { ...emptyDraft(), ...draft, gcs, gc, id: 'bp' + Date.now(), status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false, archived: false, entryDate: new Date().toLocaleDateString([], { month: 'short', day: '2-digit', year: 'numeric' }) } as BidProject;
+      const nb: BidProject = { ...emptyDraft(), ...draft, gcs, gc, office, id: 'bp' + Date.now(), status: 'pending', assignees: [], declineReason: '', declineNote: '', reviewReason: '', notified: false, archived: false, entryDate: new Date().toLocaleDateString([], { month: 'short', day: '2-digit', year: 'numeric' }) } as BidProject;
       setSt(s => ({ ...s, bidProjects: [nb, ...s.bidProjects] }));
     }
     setShowUpload(false); setEditBid(null); setDraft(emptyDraft()); setItbText('');
@@ -506,6 +572,19 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
     const contactPhone = find(/(\(?\d{3}\)?[\s\-\.]\d{3}[\s\-\.]\d{4})/);
     const contactTitle = find(/(?:title|role|position)[:\s]+(.+)/i);
 
+    // Detect type of construction from text
+    const typeConstruction = /renovation|renovate|reno\b/i.test(text) ? 'Renovation' :
+      /upfit|tenant\s+improvement|TI\b/i.test(text) ? 'Upfit' :
+      /new\s+construction|ground\s+up/i.test(text) ? 'New Construction' : undefined;
+
+    // Detect building type
+    const buildingType = /medical|hospital|health/i.test(text) ? 'Healthcare' :
+      /school|university|college|campus/i.test(text) ? 'Education' :
+      /hotel|hospitality|resort/i.test(text) ? 'Hospitality' :
+      /data\s+center/i.test(text) ? 'Data Center' :
+      /government|federal|state\s+agency/i.test(text) ? 'Government' :
+      /warehouse|industrial|manufacturing/i.test(text) ? 'Industrial' : undefined;
+
     setDraft(d => {
       const newGcs = [...(d.gcs || [emptyGc()])];
       if (gcCompany || contactName || contactEmail || contactPhone) {
@@ -518,6 +597,8 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
           contactPhone: contactPhone || newGcs[0].contactPhone,
         };
       }
+      const resolvedLocation = location || d.location || '';
+      const inferredOffice = inferOffice(resolvedLocation);
       return {
         ...d,
         name: projName || d.name,
@@ -525,13 +606,16 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
         gcs: newGcs,
         bidDate: bidDate || d.bidDate,
         level: matchedLevel || levelRaw || d.level,
-        location: location || d.location,
+        location: resolvedLocation,
         scope: scope || d.scope,
         planRoom: planRoom || d.planRoom,
         info: d.info || text.slice(0, 800),
+        ...(inferredOffice && !d.office ? { office: inferredOffice } : {}),
+        ...(typeConstruction && !d.typeConstruction ? { typeConstruction } : {}),
+        ...(buildingType && !d.buildingType ? { buildingType } : {}),
       };
     });
-    flash('Fields extracted — review and confirm before saving');
+    flash('Fields auto-filled — correct any errors before saving');
   }
 
   function exportEstimatorPdf() {
@@ -630,12 +714,12 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
       </div>
 
       {/* stat row */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
-        {[['AWAITING DECISION', pending, 'var(--color-text)'], ['IN REVIEW', inReview, 'oklch(0.50 0.18 240)'], ['ACCEPTED', accepted, '#1f7a4d'], ['DECLINED', declined, 'var(--color-accent)'], ['ARCHIVED', archived, 'var(--color-neutral-500)']].map(([label, n, color], i) => (
-          <div key={label as string} style={{ padding: '16px 28px', borderLeft: i > 0 ? '1px solid var(--color-divider)' : 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ font: '500 11px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-600)' }}>{label as string}</div>
-            <div style={{ font: '800 34px/1 var(--font-heading)', color: color as string }}>{n as number}</div>
-          </div>
+      <div style={{ display: 'flex', borderBottom: '2px solid var(--color-text)', flexShrink: 0, overflowX: 'auto' }}>
+        {[['AWAITING', pending, 'var(--color-text)', 'pending'], ['IN REVIEW', inReview, 'oklch(0.50 0.18 240)', 'review'], ['ACCEPTED', accepted, '#1f7a4d', 'accepted'], ['DECLINED', declined, 'var(--color-accent)', 'declined'], ['ARCHIVED', archived, 'var(--color-neutral-500)', 'archived']].map(([label, n, color, f], i) => (
+          <button key={label as string} onClick={() => setFilter(f as Parameters<typeof setFilter>[0])} style={{ flex: '1 1 0', minWidth: 100, padding: '12px 20px', borderLeft: i > 0 ? '1px solid var(--color-divider)' : 'none', display: 'flex', flexDirection: 'column', gap: 4, background: filter === f ? 'var(--color-neutral-100)' : 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left' }}>
+            <div style={{ font: '500 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-600)', whiteSpace: 'nowrap' }}>{label as string}</div>
+            <div style={{ font: '800 28px/1 var(--font-heading)', color: color as string }}>{n as number}</div>
+          </button>
         ))}
       </div>
 
@@ -1085,10 +1169,23 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
         const addGc = () => { if (draftGcs.length >= 4) return; setDraft(d => ({ ...d, gcs: [...(d.gcs || []), emptyGc()] })); };
         const removeGc = (i: number) => setDraft(d => ({ ...d, gcs: (d.gcs || []).filter((_, j) => j !== i) }));
         const photoFileRef = React.createRef<HTMLInputElement>();
+        const cropToSquare = (dataUrl: string, cb: (out: string) => void) => {
+          const img = new Image();
+          img.onload = () => {
+            const size = Math.min(img.width, img.height);
+            const canvas = document.createElement('canvas');
+            canvas.width = canvas.height = Math.min(size, 800);
+            const ctx = canvas.getContext('2d')!;
+            const sx = (img.width - size) / 2, sy = (img.height - size) / 2;
+            ctx.drawImage(img, sx, sy, size, size, 0, 0, canvas.width, canvas.height);
+            cb(canvas.toDataURL('image/jpeg', 0.88));
+          };
+          img.src = dataUrl;
+        };
         const handleDraftPhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
           const file = e.target.files?.[0]; if (!file) return;
           const reader = new FileReader();
-          reader.onload = ev => setDraft(d => ({ ...d, photo: ev.target?.result as string }));
+          reader.onload = ev => cropToSquare(ev.target?.result as string, sq => setDraft(d => ({ ...d, photo: sq })));
           reader.readAsDataURL(file);
         };
         const handleDraftPhotoPaste = (e: React.ClipboardEvent) => {
@@ -1096,7 +1193,7 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
           if (!item) return;
           const file = item.getAsFile(); if (!file) return;
           const reader = new FileReader();
-          reader.onload = ev => setDraft(d => ({ ...d, photo: ev.target?.result as string }));
+          reader.onload = ev => cropToSquare(ev.target?.result as string, sq => setDraft(d => ({ ...d, photo: sq })));
           reader.readAsDataURL(file);
         };
         return (
@@ -1109,10 +1206,10 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                   {/* photo area */}
                   <div
                     onPaste={handleDraftPhotoPaste}
-                    style={{ position: 'relative', height: 220, background: draft.photo ? 'none' : 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, overflow: 'hidden', borderBottom: '1px solid var(--color-divider)', cursor: 'default' }}
+                    style={{ position: 'relative', width: 300, height: 300, background: draft.photo ? 'none' : 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, overflow: 'hidden', borderBottom: '1px solid var(--color-divider)', cursor: 'default' }}
                   >
                     {draft.photo
-                      ? <img src={draft.photo} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }} />
+                      ? <img src={draft.photo} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                       : <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: 20, textAlign: 'center' }}>
                           <div style={{ font: '300 40px/1', color: 'var(--color-neutral-400)' }}>📷</div>
                           <div style={{ font: '600 11px/1.4 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)' }}>PASTE PHOTO</div>
@@ -1140,35 +1237,83 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                 </div>
                 {/* RIGHT: form fields */}
                 <div style={{ flex: 1, overflow: 'auto', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-                  {/* Project info */}
+                  {/* Core project info */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                    <div style={{ gridColumn: '1/-1' }}><Field label="PROJECT NAME">
+                    <div style={{ gridColumn: '1/-1' }}><Field label="PROJECT NAME *">
                       <input value={draft.name || ''} onChange={e => setDraft(d => ({ ...d, name: e.target.value }))} style={inp} autoFocus />
                     </Field></div>
                     <Field label="BID DATE">
                       <input value={draft.bidDate || ''} onChange={e => setDraft(d => ({ ...d, bidDate: e.target.value }))} placeholder="Sep 20" style={inp} />
                     </Field>
                     <Field label="DRAWING LEVEL">
-                      <input
-                        value={draft.level || ''}
-                        onChange={e => setDraft(d => ({ ...d, level: e.target.value }))}
-                        list="bid-levels-list"
-                        placeholder="e.g. 100% CD or type custom"
-                        style={inp}
-                      />
-                      <datalist id="bid-levels-list">
-                        {BID_LEVELS.map(l => <option key={l} value={l} />)}
-                      </datalist>
+                      <input value={draft.level || ''} onChange={e => setDraft(d => ({ ...d, level: e.target.value }))} list="bid-levels-list" placeholder="e.g. 100% CD" style={inp} />
+                      <datalist id="bid-levels-list">{BID_LEVELS.map(l => <option key={l} value={l} />)}</datalist>
                     </Field>
                     <Field label="LOCATION">
-                      <input value={draft.location || ''} onChange={e => setDraft(d => ({ ...d, location: e.target.value }))} placeholder="City, ST" style={inp} />
+                      <input value={draft.location || ''} onChange={e => {
+                        const loc = e.target.value;
+                        const office = inferOffice(loc);
+                        setDraft(d => ({ ...d, location: loc, ...(office ? { office } : {}) }));
+                      }} placeholder="City, ST" style={inp} />
                     </Field>
-                    <Field label="JOB SIZE">
+                    <Field label="OFFICE">
+                      <select value={draft.office || ''} onChange={e => setDraft(d => ({ ...d, office: e.target.value as import('./data').BidOffice }))} style={inp}>
+                        <option value="">Auto from location…</option>
+                        <option value="Charlotte">Charlotte</option>
+                        <option value="Atlanta">Atlanta</option>
+                        <option value="Charleston">Charleston</option>
+                      </select>
+                    </Field>
+                    <Field label="JOB SIZE *">
                       <select value={draft.jobSize || ''} onChange={e => setDraft(d => ({ ...d, jobSize: e.target.value as 'large' | 'medium' | 'small' }))} style={inp}>
                         <option value="">Select size…</option>
                         <option value="large">Large</option>
                         <option value="medium">Medium</option>
                         <option value="small">Small</option>
+                      </select>
+                    </Field>
+                    <Field label="TYPE OF BID">
+                      <select value={draft.typeBid || ''} onChange={e => setDraft(d => ({ ...d, typeBid: e.target.value as import('./data').BidTypeBid }))} style={inp}>
+                        <option value="">Select…</option>
+                        {(['Negotiated', 'Hard Bid', 'Design-Build', 'CM at Risk', 'Other'] as const).map(o => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="WORK TYPE">
+                      <select value={draft.workType || ''} onChange={e => setDraft(d => ({ ...d, workType: e.target.value as import('./data').BidWorkType }))} style={inp}>
+                        <option value="">Select…</option>
+                        {(['Curtain Wall', 'Storefront', 'Window Wall', 'Entrances & Doors', 'Skylights', 'Glass Partitions', 'ACM / Cladding', 'Mixed Scope', 'Other'] as const).map(o => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="BUILDING TYPE">
+                      <select value={draft.buildingType || ''} onChange={e => setDraft(d => ({ ...d, buildingType: e.target.value as import('./data').BidBuildingType }))} style={inp}>
+                        <option value="">Select…</option>
+                        {(['Office', 'Healthcare', 'Education', 'Hospitality', 'Retail', 'Industrial', 'Multi-Family Residential', 'Mixed-Use', 'Government', 'Data Center', 'Other'] as const).map(o => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="TYPE OF CONSTRUCTION">
+                      <select value={draft.typeConstruction || ''} onChange={e => setDraft(d => ({ ...d, typeConstruction: e.target.value as import('./data').BidTypeConstruction }))} style={inp}>
+                        <option value="">Select…</option>
+                        {(['New Construction', 'Renovation', 'Upfit', 'Other'] as const).map(o => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="CLIENT TIER">
+                      <select value={draft.clientTier || ''} onChange={e => setDraft(d => ({ ...d, clientTier: e.target.value as import('./data').BidClientTier }))} style={inp}>
+                        <option value="">Select…</option>
+                        <option value="1">Tier 1</option>
+                        <option value="2">Tier 2</option>
+                        <option value="3">Tier 3</option>
+                        <option value="4">Tier 4 (non-tiered)</option>
+                      </select>
+                    </Field>
+                    <Field label="MANAGER">
+                      <select value={draft.manager || ''} onChange={e => setDraft(d => ({ ...d, manager: e.target.value }))} style={inp}>
+                        <option value="">Select…</option>
+                        {PEOPLE.filter(p => MANAGER_IDS.includes(p.id)).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="BD CONTACT">
+                      <select value={draft.bd || ''} onChange={e => setDraft(d => ({ ...d, bd: e.target.value }))} style={inp}>
+                        {BD_TEAM.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                       </select>
                     </Field>
                     <div style={{ gridColumn: '1/-1' }}><Field label="SCOPE OF WORK">
@@ -1192,24 +1337,12 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                             {i > 0 && <button onClick={() => removeGc(i)} style={{ padding: '3px 7px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 9px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>REMOVE</button>}
                           </div>
                           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                            <Field label="COMPANY NAME">
-                              <input value={gc.company} onChange={e => patchGc(i, { company: e.target.value })} style={{ ...inp, fontSize: 12 }} />
-                            </Field>
-                            <Field label="OFFICE LOCATION">
-                              <input value={gc.location} onChange={e => patchGc(i, { location: e.target.value })} placeholder="City, ST" style={{ ...inp, fontSize: 12 }} />
-                            </Field>
-                            <Field label="CONTACT NAME">
-                              <input value={gc.contactName} onChange={e => patchGc(i, { contactName: e.target.value })} style={{ ...inp, fontSize: 12 }} />
-                            </Field>
-                            <Field label="TITLE">
-                              <input value={gc.contactTitle} onChange={e => patchGc(i, { contactTitle: e.target.value })} placeholder="Project Manager" style={{ ...inp, fontSize: 12 }} />
-                            </Field>
-                            <Field label="EMAIL">
-                              <input value={gc.contactEmail} onChange={e => patchGc(i, { contactEmail: e.target.value })} type="email" style={{ ...inp, fontSize: 12 }} />
-                            </Field>
-                            <Field label="PHONE">
-                              <input value={gc.contactPhone} onChange={e => patchGc(i, { contactPhone: e.target.value })} type="tel" placeholder="000-000-0000" style={{ ...inp, fontSize: 12 }} />
-                            </Field>
+                            <Field label="COMPANY NAME"><input value={gc.company} onChange={e => patchGc(i, { company: e.target.value })} style={{ ...inp, fontSize: 12 }} /></Field>
+                            <Field label="GC OFFICE LOCATION"><input value={gc.location} onChange={e => patchGc(i, { location: e.target.value })} placeholder="City, ST" style={{ ...inp, fontSize: 12 }} /></Field>
+                            <Field label="CONTACT NAME"><input value={gc.contactName} onChange={e => patchGc(i, { contactName: e.target.value })} style={{ ...inp, fontSize: 12 }} /></Field>
+                            <Field label="TITLE"><input value={gc.contactTitle} onChange={e => patchGc(i, { contactTitle: e.target.value })} placeholder="Project Manager" style={{ ...inp, fontSize: 12 }} /></Field>
+                            <Field label="EMAIL"><input value={gc.contactEmail} onChange={e => patchGc(i, { contactEmail: e.target.value })} type="email" style={{ ...inp, fontSize: 12 }} /></Field>
+                            <Field label="PHONE"><input value={gc.contactPhone} onChange={e => patchGc(i, { contactPhone: e.target.value })} type="tel" placeholder="000-000-0000" style={{ ...inp, fontSize: 12 }} /></Field>
                           </div>
                         </div>
                       ))}
@@ -1440,28 +1573,30 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
       ['teamcapacity', "My team's capacity", 0],
       ['calendar', 'Calendar', 0], ['capacity', 'My capacity', 0],
       ['projects', 'Projects', projects.length],
-      ['teamconnection', 'Team Connection', tcUnread],
-      ['meetings', 'AI Meeting Notes', st.meetingHistory.length],
-      ['resources', 'Resources', 0]]
+      ['meetings', 'AI Meeting Notes', st.meetingHistory.length]]
     : [['myday', 'My day', st.tasks.filter(t => t.who === userId && t.status !== 'Complete').length],
       ['calendar', 'Calendar', 0], ['projects', 'Projects', projects.length],
-      ['teamconnection', 'Team Connection', tcUnread],
       ['capacity', 'My capacity', 0],
-      ['meetings', 'AI Meeting Notes', st.meetingHistory.length],
-      ['resources', 'Resources', 0]];
+      ['meetings', 'AI Meeting Notes', st.meetingHistory.length]];
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--color-bg)', overflow: 'hidden' }}>
       {/* ── top tab strip ── */}
       <div style={{ display: 'flex', alignItems: 'stretch', height: 38, background: 'var(--color-text)', flexShrink: 0, zIndex: 50 }}>
-        {(['board', 'tracker'] as AppTab[]).map(a => (
-          <button key={a} onClick={() => setSt(s => ({ ...s, app: a }))} style={{ padding: '0 22px', border: 'none', cursor: 'pointer', background: st.app === a ? 'var(--color-accent)' : 'transparent', color: '#fff', font: '600 11px/1 var(--font-body)', letterSpacing: '.12em' }}>
-            {a === 'board' ? 'BID BOARD' : 'TASK TRACKER'}
+        {([['board', 'BID BOARD'], ['tracker', 'TASK TRACKER'], ['companies', 'COMPANY CONTACTS'], ['bizdev', 'BUSINESS DEVELOPMENT'], ['teamconnection', 'TEAM CONNECTION'], ['resources', 'RESOURCES'], ['vendors', 'VENDOR CONTACTS']] as [AppTab, string][]).map(([a, label]) => (
+          <button key={a} onClick={() => setSt(s => ({ ...s, app: a }))} style={{ padding: '0 22px', border: 'none', cursor: 'pointer', background: st.app === a ? 'var(--color-accent)' : 'transparent', color: '#fff', font: '600 11px/1 var(--font-body)', letterSpacing: '.12em', position: 'relative' }}>
+            {label}
+            {a === 'teamconnection' && tcUnread > 0 && <span style={{ position: 'absolute', top: 6, right: 8, width: 7, height: 7, background: '#22c55e', borderRadius: '50%' }} />}
           </button>
         ))}
       </div>
 
       {st.app === 'board' && <BidBoardView st={st} setSt={setSt} me={me} flash={flash} onSignOut={onSignOut} />}
+      {st.app === 'teamconnection' && <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}><TeamConnectionView st={st} setSt={setSt} me={me} isManager={isManager} /></div>}
+      {st.app === 'resources' && <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}><ResourcesViewMain st={st} setSt={setSt} me={me} /></div>}
+      {st.app === 'vendors' && <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}><VendorContactsView st={st} setSt={setSt} me={me} /></div>}
+      {st.app === 'companies' && <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}><CompanyContactsView st={st} setSt={setSt} me={me} flash={flash} /></div>}
+      {st.app === 'bizdev' && <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}><BizDevView st={st} setSt={setSt} me={me} flash={flash} /></div>}
       {st.app === 'tracker' && (
         <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}>
           {/* ── sidebar ── */}
@@ -1510,9 +1645,7 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
               {st.view === 'capacity' && <CapacityView st={st} setSt={setSt} me={me} isManager={false} team={[me]} onSignOut={onSignOut} />}
               {st.view === 'teamcapacity' && <CapacityView st={st} setSt={setSt} me={me} isManager={true} team={teamOf()} onSignOut={onSignOut} />}
               {st.view === 'projects' && <ProjectsView st={st} setSt={setSt} me={me} isManager={isManager} projects={projects} setTaskStatus={setTaskStatus} flash={flash} logNote={logNote} onSignOut={onSignOut} />}
-              {st.view === 'teamconnection' && <TeamConnectionView st={st} setSt={setSt} me={me} isManager={isManager} />}
               {st.view === 'meetings' && <MeetingNotesView st={st} setSt={setSt} me={me} projects={projects} flash={flash} />}
-              {st.view === 'resources' && <ResourcesView st={st} setSt={setSt} me={me} />}
             </div>
           </div>
         </div>
@@ -1741,8 +1874,68 @@ function MyDayView({ st, setSt, me, isManager, onSignOut, focusId, focusProject,
             )}
           </div>
 
-          {/* right: MY WEEK + IN FOCUS */}
+          {/* right: TODAY'S SCHEDULE + MY WEEK + IN FOCUS */}
           <div style={{ overflow: 'auto', padding: 28, display: 'flex', flexDirection: 'column', gap: 22, background: 'var(--color-neutral-100)' }}>
+            {/* TODAY'S SCHEDULE — time blocks */}
+            {(() => {
+              const todayKey = ymd(t0);
+              const todayTasks = st.tasks.filter(t => t.who === me.id && t.date === todayKey && t.status !== 'Complete');
+              const morningTasks = todayTasks.filter(t => (t.timeBlock || 'morning') === 'morning');
+              const afternoonTasks = todayTasks.filter(t => t.timeBlock === 'afternoon');
+              return (
+                <div>
+                  <div style={{ font: '800 14px/1 var(--font-heading)', marginBottom: 12 }}>TODAY'S SCHEDULE</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    {/* Morning block */}
+                    <div style={{ background: '#e8f0ff', padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.12em', color: 'oklch(0.45 0.18 240)' }}>MORNING</span>
+                      <span style={{ font: '400 10px/1 var(--font-body)', color: 'oklch(0.55 0.12 240)' }}>8:00 AM – 12:00 PM</span>
+                    </div>
+                    {morningTasks.length === 0
+                      ? <div style={{ padding: '10px 12px', background: '#f0f5ff', font: '400 11.5px/1 var(--font-body)', color: 'var(--color-neutral-400)', border: '1px dashed #c8d8ff' }}>Nothing scheduled this block</div>
+                      : morningTasks.map(t => {
+                          const proj = PROJECTS.find(p => p.id === t.projectId) || st.bidProjects.find(b => b.id === t.projectId);
+                          return (
+                            <button key={t.id} onClick={() => setSt(s => ({ ...s, openTaskId: t.id }))} style={{ textAlign: 'left', padding: '9px 12px', background: '#fff', border: 'none', borderLeft: '3px solid ' + statusColor(t.status), borderBottom: '1px solid #d8e8ff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                              <span style={{ font: '600 12px/1.3 var(--font-body)', flex: 1 }}>{t.title}</span>
+                              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flexShrink: 0 }}>
+                                <span style={{ font: '600 10px/1 var(--font-body)', color: 'var(--color-accent)' }}>{t.hrs}h</span>
+                                <span style={{ font: '400 10px/1 var(--font-body)', color: 'var(--color-neutral-400)' }}>{'short' in (proj || {}) ? (proj as {short: string}).short : (proj as {name?: string})?.name || ''}</span>
+                              </div>
+                            </button>
+                          );
+                        })
+                    }
+                    {/* Lunch */}
+                    <div style={{ padding: '7px 12px', background: 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-500)' }}>LUNCH</span>
+                      <span style={{ font: '400 10px/1 var(--font-body)', color: 'var(--color-neutral-400)' }}>12:00 PM – 1:00 PM · Blocked</span>
+                    </div>
+                    {/* Afternoon block */}
+                    <div style={{ background: '#fff8e8', padding: '8px 10px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.12em', color: '#b45309' }}>AFTERNOON</span>
+                      <span style={{ font: '400 10px/1 var(--font-body)', color: '#92400e' }}>1:00 PM – 5:00 PM</span>
+                    </div>
+                    {afternoonTasks.length === 0
+                      ? <div style={{ padding: '10px 12px', background: '#fffbf0', font: '400 11.5px/1 var(--font-body)', color: 'var(--color-neutral-400)', border: '1px dashed #ffe0a0' }}>Nothing scheduled this block</div>
+                      : afternoonTasks.map(t => {
+                          const proj = PROJECTS.find(p => p.id === t.projectId) || st.bidProjects.find(b => b.id === t.projectId);
+                          return (
+                            <button key={t.id} onClick={() => setSt(s => ({ ...s, openTaskId: t.id }))} style={{ textAlign: 'left', padding: '9px 12px', background: '#fff', border: 'none', borderLeft: '3px solid ' + statusColor(t.status), borderBottom: '1px solid #ffe5b4', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                              <span style={{ font: '600 12px/1.3 var(--font-body)', flex: 1 }}>{t.title}</span>
+                              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flexShrink: 0 }}>
+                                <span style={{ font: '600 10px/1 var(--font-body)', color: 'var(--color-accent)' }}>{t.hrs}h</span>
+                                <span style={{ font: '400 10px/1 var(--font-body)', color: 'var(--color-neutral-400)' }}>{'short' in (proj || {}) ? (proj as {short: string}).short : (proj as {name?: string})?.name || ''}</span>
+                              </div>
+                            </button>
+                          );
+                        })
+                    }
+                  </div>
+                  {todayTasks.length === 0 && <div style={{ font: '400 12px/1 var(--font-body)', color: 'var(--color-neutral-400)', paddingTop: 4 }}>No tasks scheduled for today. Drag tasks from the weekly calendar to assign them.</div>}
+                </div>
+              );
+            })()}
             <div>
               <div style={{ font: '800 14px/1 var(--font-heading)', marginBottom: 14 }}>MY WEEK</div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 6, alignItems: 'end', height: 110 }}>
@@ -2150,6 +2343,8 @@ function CalendarView({ st, setSt, me, isManager, onSignOut, flash, teamMode, te
 }) {
   const [personFilter, setPersonFilter] = useState<string>('ALL');
   const [calMode, setCalMode] = useState<'week' | 'month'>('week');
+  const [calDragId, setCalDragId] = useState<string | null>(null);
+  const [calDragOver, setCalDragOver] = useState<{day: string; block: TimeBlock} | null>(null);
   const t0 = today0(); const wkStart = addDays(mondayOf(t0), st.calOff * 7);
   const displayTeam = teamMode && team ? team : undefined;
   const people = displayTeam || [me];
@@ -2200,33 +2395,105 @@ function CalendarView({ st, setSt, me, isManager, onSignOut, flash, teamMode, te
       </div>
 
       {calMode === 'week' ? (
-        /* WEEK VIEW — Mon–Fri columns */
-        <div style={{ flex: 1, overflow: 'auto', display: 'grid', gridTemplateColumns: 'repeat(5,1fr)' }}>
-          {days.filter(d => d.dayName !== 'SAT' && d.dayName !== 'SUN').map(day => (
-            <div key={day.key} style={{ borderRight: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', minHeight: 320 }}>
-              <div style={{ height: 64, flexShrink: 0, padding: '0 16px', borderBottom: '2px solid ' + (day.isToday ? 'var(--color-accent)' : 'var(--color-divider)'), background: day.isToday ? 'var(--color-text)' : 'var(--color-neutral-100)', color: day.isToday ? '#fff' : 'var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div>
-                  <div style={{ font: '800 15px/1 var(--font-heading)', letterSpacing: '.06em' }}>{day.dayName}</div>
-                  <div style={{ font: '500 12px/1 var(--font-body)', opacity: .7, marginTop: 5 }}>{prettyShort(day.date)}</div>
-                </div>
-                {day.hrs > 0 && <span style={{ font: '800 20px/1 var(--font-heading)', color: day.isToday ? 'var(--color-accent-300)' : 'var(--color-accent)' }}>{day.hrs}h</span>}
+        /* WEEK VIEW — Mon–Fri columns with time blocks */
+        (() => {
+          const dragId = calDragId; const setDragId = setCalDragId;
+          const dragOver = calDragOver; const setDragOver = setCalDragOver;
+
+          function dropTask(taskId: string, toDay: string, toBlock: TimeBlock) {
+            setSt(s => ({
+              ...s,
+              tasks: s.tasks.map(t => t.id === taskId ? { ...t, date: toDay, timeBlock: toBlock } : t)
+            }));
+            setDragId(null); setDragOver(null);
+          }
+
+          const workdays = days.filter(d => d.dayName !== 'SAT' && d.dayName !== 'SUN');
+          const TIME_BLOCKS: Array<{ id: TimeBlock; label: string; range: string; color: string }> = [
+            { id: 'morning',   label: 'MORNING',   range: '8 AM – 12 PM', color: '#e8f0ff' },
+            { id: 'afternoon', label: 'AFTERNOON', range: '1 PM – 5 PM',  color: '#fff8e8' },
+          ];
+
+          return (
+            <div style={{ flex: 1, overflow: 'auto', minWidth: 0 }}>
+              {/* Day header row */}
+              <div style={{ display: 'grid', gridTemplateColumns: '72px repeat(5,1fr)', borderBottom: '2px solid var(--color-text)', position: 'sticky', top: 0, zIndex: 10, background: 'var(--color-bg)' }}>
+                <div style={{ borderRight: '1px solid var(--color-divider)' }} />
+                {workdays.map(day => (
+                  <div key={day.key} style={{ padding: '10px 14px', borderRight: '1px solid var(--color-divider)', background: day.isToday ? 'var(--color-text)' : 'var(--color-neutral-100)', color: day.isToday ? '#fff' : 'var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div>
+                      <div style={{ font: '800 13px/1 var(--font-heading)', letterSpacing: '.06em' }}>{day.dayName}</div>
+                      <div style={{ font: '500 11px/1 var(--font-body)', opacity: .7, marginTop: 4 }}>{prettyShort(day.date)}</div>
+                    </div>
+                    {day.hrs > 0 && <span style={{ font: '700 16px/1 var(--font-heading)', color: day.isToday ? 'var(--color-accent-300)' : 'var(--color-accent)' }}>{day.hrs}h</span>}
+                  </div>
+                ))}
               </div>
-              <div style={{ flex: 1, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8, overflow: 'auto' }}>
-                {day.tasks.length === 0 && <div style={{ font: '500 12px/1.5 var(--font-body)', color: 'var(--color-neutral-500)', paddingTop: 8 }}>—</div>}
-                {day.tasks.map(t => {
-                  const proj = PROJECTS.find(p => p.id === t.projectId);
-                  return (
-                    <button key={t.id} onClick={() => setSt(s => ({ ...s, openTaskId: t.id }))} style={{ textAlign: 'left', padding: '10px 12px', background: 'var(--color-bg)', cursor: 'pointer', border: 'none', borderLeftWidth: 4, borderLeftStyle: 'solid', borderLeftColor: statusColor(t.status), display: 'flex', flexDirection: 'column', gap: 5, boxShadow: '0 1px 3px rgba(0,0,0,.07)' }}>
-                      <span style={{ font: '600 13.5px/1.35 var(--font-body)' }}>{t.title}</span>
-                      <span style={{ font: '500 11.5px/1 var(--font-body)', color: 'var(--color-neutral-600)' }}>{proj?.short || t.projectId}</span>
-                      <span style={{ font: '600 11px/1 var(--font-body)', color: 'var(--color-accent-700)', letterSpacing: '.06em' }}>{personFirst(t.who)} · {t.hrs}h</span>
-                    </button>
-                  );
-                })}
+
+              {/* Time block rows */}
+              {TIME_BLOCKS.map(block => (
+                <React.Fragment key={block.id}>
+                  {/* Block label column */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '72px repeat(5,1fr)' }}>
+                    <div style={{ padding: '8px 4px 8px 8px', background: block.color, borderRight: '1px solid var(--color-divider)', borderBottom: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', justifyContent: 'flex-start', gap: 2, minHeight: 120 }}>
+                      <span style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', writingMode: 'vertical-rl', transform: 'rotate(180deg)', marginTop: 4 }}>{block.label}</span>
+                      <span style={{ font: '500 8px/1 var(--font-body)', color: 'var(--color-neutral-400)', writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}>{block.range}</span>
+                    </div>
+                    {workdays.map(day => {
+                      const cellTasks = day.tasks.filter(t => (t.timeBlock || 'morning') === block.id);
+                      const isOver = dragOver?.day === day.key && dragOver?.block === block.id;
+                      return (
+                        <div key={day.key}
+                          onDragOver={e => { e.preventDefault(); setDragOver({ day: day.key, block: block.id }); }}
+                          onDragLeave={() => setDragOver(null)}
+                          onDrop={e => { e.preventDefault(); if (dragId) dropTask(dragId, day.key, block.id); }}
+                          style={{ minHeight: 120, padding: '8px', borderRight: '1px solid var(--color-divider)', borderBottom: '1px solid var(--color-divider)', background: isOver ? 'oklch(0.93 0.04 240)' : block.color, display: 'flex', flexDirection: 'column', gap: 6, transition: 'background .1s' }}>
+                          {cellTasks.map(t => {
+                            const proj = PROJECTS.find(p => p.id === t.projectId);
+                            const bid = st.bidProjects.find(b => b.id === t.projectId);
+                            const projName = proj?.short || bid?.name || t.projectId;
+                            return (
+                              <div key={t.id} draggable
+                                onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; setDragId(t.id); }}
+                                onDragEnd={() => { setDragId(null); setDragOver(null); }}
+                                onClick={() => setSt(s => ({ ...s, openTaskId: t.id }))}
+                                style={{ padding: '8px 10px', background: dragId === t.id ? 'rgba(255,255,255,.5)' : '#fff', cursor: 'grab', borderLeftWidth: 3, borderLeftStyle: 'solid', borderLeftColor: statusColor(t.status), display: 'flex', flexDirection: 'column', gap: 4, boxShadow: '0 1px 3px rgba(0,0,0,.08)', opacity: dragId === t.id ? .5 : 1, userSelect: 'none' }}>
+                                <span style={{ font: '600 12px/1.3 var(--font-body)' }}>{t.title}</span>
+                                <span style={{ font: '500 10.5px/1 var(--font-body)', color: 'var(--color-neutral-500)' }}>{projName}</span>
+                                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                  <span style={{ font: '600 10px/1 var(--font-body)', color: 'var(--color-accent)', letterSpacing: '.04em' }}>{t.hrs}h</span>
+                                  <span style={{ font: '400 10px/1 var(--font-body)', color: 'var(--color-neutral-400)' }}>{personFirst(t.who)}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                          {cellTasks.length === 0 && !isOver && (
+                            <div style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-300)', paddingTop: 2 }}>Drop here</div>
+                          )}
+                          {isOver && (
+                            <div style={{ border: '2px dashed oklch(0.55 0.18 240)', borderRadius: 2, minHeight: 40, display: 'flex', alignItems: 'center', justifyContent: 'center', font: '600 11px/1 var(--font-body)', color: 'oklch(0.45 0.18 240)' }}>Drop to schedule</div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </React.Fragment>
+              ))}
+
+              {/* Lunch row */}
+              <div style={{ display: 'grid', gridTemplateColumns: '72px repeat(5,1fr)', borderBottom: '1px solid var(--color-divider)' }}>
+                <div style={{ padding: '6px 4px 6px 8px', background: 'var(--color-neutral-200)', borderRight: '1px solid var(--color-divider)', display: 'flex', alignItems: 'center' }}>
+                  <span style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-500)', writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}>LUNCH</span>
+                </div>
+                {workdays.map(day => (
+                  <div key={day.key} style={{ height: 36, background: 'var(--color-neutral-200)', borderRight: '1px solid var(--color-divider)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <span style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-400)' }}>12 – 1 PM · BLOCKED</span>
+                  </div>
+                ))}
               </div>
             </div>
-          ))}
-        </div>
+          );
+        })()
       ) : (
         /* MONTH VIEW */
         (() => {
@@ -2436,13 +2703,214 @@ function CapacityView({ st, setSt, me, isManager, team, onSignOut }: { st: AppSt
 }
 
 // ─── Projects ─────────────────────────────────────────────────────────────────
+// ─── Companies CRM View ────────────────────────────────────────────────────────
+function CompaniesView({ st, setSt, me, isManager, flash, onSignOut }: {
+  st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>;
+  me: Person; isManager: boolean; flash: (m: string) => void; onSignOut: () => void;
+}) {
+  const [search, setSearch] = React.useState('');
+  const [followUpDraft, setFollowUpDraft] = React.useState('');
+  const [nextActionDraft, setNextActionDraft] = React.useState('');
+
+  // Build companies from bid projects' GCs
+  type Company = { name: string; location: string; contacts: Array<{ name: string; title: string; email: string; phone: string }>; relatedBids: typeof st.bidProjects; tier?: string; status: string; };
+  const companyMap: Record<string, Company> = {};
+  for (const bid of st.bidProjects) {
+    const gcs = bid.gcs?.filter(g => g.company) || (bid.gc ? [{ company: bid.gc, location: '', contactName: '', contactTitle: '', contactEmail: '', contactPhone: '' }] : []);
+    for (const gc of gcs) {
+      if (!gc.company) continue;
+      if (!companyMap[gc.company]) {
+        companyMap[gc.company] = { name: gc.company, location: gc.location || '', contacts: [], relatedBids: [], status: 'Active', tier: bid.clientTier };
+      }
+      const existing = companyMap[gc.company];
+      existing.relatedBids.push(bid);
+      if (gc.contactName && !existing.contacts.find(c => c.name === gc.contactName)) {
+        existing.contacts.push({ name: gc.contactName, title: gc.contactTitle || '', email: gc.contactEmail || '', phone: gc.contactPhone || '' });
+      }
+    }
+  }
+  const companies = Object.values(companyMap).sort((a, b) => a.name.localeCompare(b.name));
+  const filtered = search ? companies.filter(c => c.name.toLowerCase().includes(search.toLowerCase()) || c.location.toLowerCase().includes(search.toLowerCase())) : companies;
+  const selected = st.selectedCompany ? companyMap[st.selectedCompany] : null;
+  const compFollowUps = selected ? (st.companyFollowUps[selected.name] || []) : [];
+
+  const addFollowUp = () => {
+    if (!selected || !followUpDraft.trim()) return;
+    const fu = { id: 'fu' + Date.now(), date: new Date().toLocaleDateString([], { month: 'short', day: 'numeric' }), note: followUpDraft.trim(), by: me.first, done: false, nextAction: nextActionDraft.trim() };
+    setSt(s => ({ ...s, companyFollowUps: { ...s.companyFollowUps, [selected.name]: [fu, ...(s.companyFollowUps[selected.name] || [])] } }));
+    setFollowUpDraft(''); setNextActionDraft('');
+    flash('Follow-up logged');
+  };
+  const toggleDone = (fuId: string) => {
+    if (!selected) return;
+    setSt(s => ({ ...s, companyFollowUps: { ...s.companyFollowUps, [selected.name]: (s.companyFollowUps[selected.name] || []).map(f => f.id === fuId ? { ...f, done: !f.done } : f) } }));
+  };
+
+  const tierLabel = (t?: string) => t === '1' ? 'Tier 1' : t === '2' ? 'Tier 2' : t === '3' ? 'Tier 3' : t === '4' ? 'Tier 4' : '—';
+  const tierColor = (t?: string) => t === '1' ? '#1f7a4d' : t === '2' ? 'oklch(0.50 0.18 240)' : t === '3' ? '#b45309' : 'var(--color-neutral-500)';
+
+  return (
+    <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+      {/* company list */}
+      <div style={{ width: 280, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <ViewHeader title="Companies" me={me} onSignOut={onSignOut} />
+        <div style={{ display: 'flex', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
+          <button onClick={() => setSt(s => ({ ...s, projViewTab: 'projects' }))} style={{ padding: '10px 14px', border: 'none', borderRight: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>PROJECTS</button>
+          <button style={{ flex: 1, padding: '10px 14px', border: 'none', background: 'var(--color-text)', color: '#fff', font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>COMPANIES · {companies.length}</button>
+        </div>
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--color-divider)' }}>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search companies" style={{ ...inp, width: '100%', padding: '7px 10px' }} />
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {filtered.map(c => {
+            const active = st.selectedCompany === c.name;
+            const openBids = c.relatedBids.filter(b => !b.archived && b.status !== 'declined').length;
+            const lastFu = (st.companyFollowUps[c.name] || [])[0];
+            return (
+              <button key={c.name} onClick={() => setSt(s => ({ ...s, selectedCompany: c.name }))} style={{ width: '100%', padding: '12px 14px', border: 'none', borderBottom: '1px solid var(--color-divider)', borderLeft: active ? '3px solid var(--color-accent)' : '3px solid transparent', background: active ? 'var(--color-neutral-200)' : 'transparent', textAlign: 'left', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ font: '600 13px/1.2 var(--font-body)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 6 }}>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
+                  {c.tier && <span style={{ font: '700 9px/1 var(--font-body)', padding: '2px 6px', background: tierColor(c.tier), color: '#fff', flexShrink: 0 }}>{tierLabel(c.tier)}</span>}
+                </div>
+                <div style={{ font: '400 10.5px/1 var(--font-body)', color: 'var(--color-neutral-600)' }}>{c.location || '—'} · {openBids} bid{openBids !== 1 ? 's' : ''}</div>
+                {lastFu && <div style={{ font: '400 10px/1.4 var(--font-body)', color: 'var(--color-neutral-500)', marginTop: 2 }}>Last: {lastFu.date} · {lastFu.note.slice(0, 40)}{lastFu.note.length > 40 ? '…' : ''}</div>}
+              </button>
+            );
+          })}
+          {filtered.length === 0 && <div style={{ padding: '20px 14px', ...T.meta }}>No companies match.</div>}
+        </div>
+      </div>
+
+      {/* company detail */}
+      {!selected ? (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ font: '500 13px/1.5 var(--font-body)', color: 'var(--color-neutral-500)', textAlign: 'center' }}>Select a company to view details</div>
+        </div>
+      ) : (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+          {/* company header */}
+          <div style={{ padding: '20px 28px', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 20 }}>
+              <div>
+                <div style={{ font: '800 26px/1.1 var(--font-heading)' }}>{selected.name}</div>
+                <div style={{ ...T.meta, marginTop: 4 }}>{selected.location || 'Location not set'}</div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {selected.tier && <span style={{ padding: '5px 12px', background: tierColor(selected.tier), color: '#fff', font: '700 11px/1 var(--font-body)', letterSpacing: '.1em' }}>{tierLabel(selected.tier)}</span>}
+              </div>
+            </div>
+            {/* stats row */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', borderTop: '1px solid var(--color-divider)', marginTop: 14 }}>
+              {[
+                ['TOTAL BIDS', selected.relatedBids.length],
+                ['OPEN BIDS', selected.relatedBids.filter(b => !b.archived && b.status !== 'declined').length],
+                ['ACCEPTED', selected.relatedBids.filter(b => b.status === 'accepted').length],
+                ['FOLLOW-UPS', compFollowUps.length],
+              ].map(([l, v], i) => (
+                <div key={l as string} style={{ padding: '10px 0', display: 'flex', flexDirection: 'column', gap: 4, borderRight: i < 3 ? '1px solid var(--color-divider)' : 'none', paddingRight: i < 3 ? 16 : 0, paddingLeft: i > 0 ? 16 : 0 }}>
+                  <div style={T.label}>{l as string}</div>
+                  <div style={{ font: '700 18px/1 var(--font-heading)' }}>{v as number}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', overflow: 'hidden', minHeight: 0 }}>
+            {/* LEFT: contacts + related bids */}
+            <div style={{ overflow: 'auto', borderRight: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 0 }}>
+              {/* Contacts */}
+              <div style={{ padding: '18px 24px', borderBottom: '1px solid var(--color-divider)' }}>
+                <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 12 }}>CONTACTS</div>
+                {selected.contacts.length === 0 && <div style={T.meta}>No contacts on file.</div>}
+                {selected.contacts.map((c, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--color-divider)' }}>
+                    <div style={{ width: 34, height: 34, background: 'var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 11px/1 var(--font-body)', color: '#fff', flexShrink: 0 }}>{c.name.split(' ').map(w => w[0]).join('').slice(0,2)}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ font: '600 13px/1 var(--font-body)' }}>{c.name}</div>
+                      <div style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 3 }}>{c.title}</div>
+                    </div>
+                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                      {c.email && <a href={'mailto:' + c.email} style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-accent)', display: 'block' }}>{c.email}</a>}
+                      {c.phone && <div style={{ font: '400 11px/1 var(--font-body)', marginTop: 3 }}>{c.phone}</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Related bids */}
+              <div style={{ padding: '18px 24px' }}>
+                <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 12 }}>RELATED BIDS / OPPORTUNITIES</div>
+                {selected.relatedBids.map(bid => {
+                  const statusColor2 = bid.status === 'accepted' ? '#1f7a4d' : bid.status === 'declined' ? 'var(--color-accent)' : bid.status === 'review' ? 'oklch(0.50 0.18 240)' : 'var(--color-neutral-600)';
+                  return (
+                    <div key={bid.id} style={{ padding: '10px 0', borderBottom: '1px solid var(--color-divider)', display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ font: '600 13px/1.2 var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bid.name}</div>
+                        <div style={{ ...T.micro, marginTop: 3 }}>{bid.scope || '—'} · {bid.bidDate}</div>
+                      </div>
+                      <span style={{ font: '700 9px/1 var(--font-body)', padding: '3px 7px', background: statusColor2, color: '#fff', letterSpacing: '.08em', flexShrink: 0, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{bid.status}</span>
+                    </div>
+                  );
+                })}
+                {selected.relatedBids.length === 0 && <div style={T.meta}>No bids on record.</div>}
+              </div>
+            </div>
+
+            {/* RIGHT: follow-up activity */}
+            <div style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', background: 'var(--color-neutral-100)' }}>
+              <div style={{ padding: '18px 24px', borderBottom: '1px solid var(--color-divider)', flexShrink: 0 }}>
+                <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 12 }}>LOG FOLLOW-UP</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <textarea value={followUpDraft} onChange={e => setFollowUpDraft(e.target.value)} placeholder="Notes from call, email, or meeting…" style={{ ...inp, minHeight: 72, resize: 'vertical', fontSize: 12 }} />
+                  <input value={nextActionDraft} onChange={e => setNextActionDraft(e.target.value)} placeholder="Next action (optional)" style={{ ...inp, fontSize: 12 }} />
+                  <button onClick={addFollowUp} style={{ padding: '9px 16px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '600 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', alignSelf: 'flex-start' }}>LOG</button>
+                </div>
+              </div>
+              <div style={{ flex: 1, overflow: 'auto', padding: '18px 24px', display: 'flex', flexDirection: 'column', gap: 0 }}>
+                <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 12 }}>FOLLOW-UP HISTORY · {compFollowUps.length}</div>
+                {compFollowUps.length === 0 && <div style={T.meta}>No follow-ups logged yet.</div>}
+                {compFollowUps.map(fu => (
+                  <div key={fu.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--color-divider)', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                    <button onClick={() => toggleDone(fu.id)} style={{ width: 18, height: 18, border: '2px solid var(--color-text)', background: fu.done ? 'var(--color-text)' : 'transparent', cursor: 'pointer', flexShrink: 0, marginTop: 2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {fu.done && <span style={{ color: '#fff', fontSize: 10, fontWeight: 800 }}>✓</span>}
+                    </button>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
+                        <span style={{ font: '600 12px/1 var(--font-body)', color: fu.done ? 'var(--color-neutral-500)' : 'var(--color-text)', textDecoration: fu.done ? 'line-through' : 'none' }}>{fu.date}</span>
+                        <span style={T.micro}>{fu.by}</span>
+                      </div>
+                      <div style={{ font: '400 12.5px/1.5 var(--font-body)', color: fu.done ? 'var(--color-neutral-500)' : 'var(--color-text)' }}>{fu.note}</div>
+                      {fu.nextAction && <div style={{ marginTop: 6, padding: '5px 10px', background: 'var(--color-bg)', border: '1px solid var(--color-divider)', font: '600 11px/1 var(--font-body)', color: 'var(--color-accent-700)' }}>→ {fu.nextAction}</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProjectsView({ st, setSt, me, isManager, projects, setTaskStatus, flash, logNote, onSignOut }: {
   st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person; isManager: boolean;
   projects: Project[]; setTaskStatus: (id: string, s: TaskStatus) => void; flash: (m: string) => void;
   logNote: (pid: string, text: string, tag: string) => boolean | void; onSignOut: () => void;
 }) {
+  const tab = st.projViewTab || 'projects';
+  if (tab === 'companies') return <CompaniesView st={st} setSt={setSt} me={me} isManager={isManager} flash={flash} onSignOut={onSignOut} />;
+
   const proj = projects.find(p => p.id === st.projectId) || projects[0];
-  if (!proj) return <div style={{ flex: 1, padding: 32 }}>No projects.</div>;
+  if (!proj) return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+      <ViewHeader title="Projects" me={me} onSignOut={onSignOut} />
+      <div style={{ display: 'flex', gap: 0, borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
+        {(['projects', 'companies'] as const).map(t => <button key={t} onClick={() => setSt(s => ({ ...s, projViewTab: t }))} style={{ padding: '11px 20px', border: 'none', borderRight: '1px solid var(--color-divider)', background: tab === t ? 'var(--color-text)' : 'transparent', color: tab === t ? '#fff' : 'var(--color-text)', font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>{t === 'projects' ? 'ACTIVE PROJECTS' : 'COMPANIES'}</button>)}
+      </div>
+      <div style={{ flex: 1, padding: 32 }}>No projects yet.</div>
+    </div>
+  );
 
   const projTasks = st.tasks.filter(t => t.projectId === proj.id && (isManager || t.who === me.id));
   const projNotes = (st.projNotes[proj.id] || []) as Array<NoteEntry & { tag?: string; label?: string }>;
@@ -2456,7 +2924,9 @@ function ProjectsView({ st, setSt, me, isManager, projects, setTaskStatus, flash
       {/* left rail */}
       <div style={{ width: 300, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <ViewHeader title="Projects" me={me} onSignOut={onSignOut} />
-        <div style={{ padding: '10px 18px', borderBottom: '2px solid var(--color-text)', ...T.label }}>ACTIVE PROJECTS · {projects.length}</div>
+        <div style={{ display: 'flex', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
+          {(['projects', 'companies'] as const).map(t => <button key={t} onClick={() => setSt(s => ({ ...s, projViewTab: t }))} style={{ flex: 1, padding: '10px 8px', border: 'none', borderRight: t === 'projects' ? '1px solid var(--color-divider)' : 'none', background: tab === t ? 'var(--color-text)' : 'transparent', color: tab === t ? '#fff' : 'var(--color-text)', font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>{t === 'projects' ? `PROJECTS · ${projects.length}` : 'COMPANIES'}</button>)}
+        </div>
         <div style={{ flex: 1, overflowY: 'auto' }}>
           {projects.map(p => {
             const open = st.tasks.filter(t => t.projectId === p.id && t.status !== 'Complete').length;
@@ -3353,13 +3823,81 @@ const PROCESSES = [
   { id: 'p3', kind: 'PDF' as const, title: 'Addendum Management', owner: 'Luis Woo', summary: 'How to track, document, and respond to project addenda during the bid period.', sections: [{ heading: '1. Monitor', body: 'Check plan room daily during the bid period for new addenda.' }, { heading: '2. Log', body: 'Record each addendum in the project log with date and description.' }, { heading: '3. Revise Estimate', body: 'Update takeoff and estimate for any scope changes.' }, { heading: '4. Notify GC', body: 'Confirm receipt of all addenda with the GC before submitting.' }] },
 ];
 
-const VENDORS = [
-  { id: 'v1', name: 'Oldcastle BuildingEnvelope', trade: 'Glass', about: 'National manufacturer of glass and glazing products. Primary supplier for large commercial projects.', leadTime: '8–12 wks', quoteTurnaround: '3–5 days', terms: 'Net 30', contacts: [{ name: 'Dana Pierce', role: 'Sales Rep', phone: '(404) 555-0182', email: 'dpierce@obe.com' }, { name: 'Marcus Trent', role: 'Technical Sales', phone: '(404) 555-0199', email: 'mtrent@obe.com' }] },
-  { id: 'v2', name: 'Kawneer', trade: 'Storefront & curtain wall', about: 'Aluminum framing systems for curtain wall, storefront, and windows. Strong code compliance documentation.', leadTime: '10–14 wks', quoteTurnaround: '4–7 days', terms: 'Net 30', contacts: [{ name: 'Sandra Lee', role: 'Regional Rep', phone: '(678) 555-0141', email: 'slee@kawneer.com' }] },
-  { id: 'v3', name: 'Arcadia', trade: 'Storefront & curtain wall', about: 'Architectural aluminum products including curtain wall and storefront. Competitive pricing on custom profiles.', leadTime: '6–10 wks', quoteTurnaround: '3–5 days', terms: 'Net 45', contacts: [{ name: 'James Ortega', role: 'Account Manager', phone: '(770) 555-0155', email: 'jortega@arcadia.com' }] },
-  { id: 'v4', name: 'Firestone Building Products', trade: 'Metal panels', about: 'Metal panel systems and facades. Known for warranty programs and installation support.', leadTime: '6–8 wks', quoteTurnaround: '2–4 days', terms: 'Net 30', contacts: [{ name: 'Lynn Cho', role: 'Sales', phone: '(615) 555-0177', email: 'lcho@firestone.com' }] },
-  { id: 'v5', name: 'Allegion', trade: 'Door hardware', about: 'Commercial door hardware and access control. Full product schedule takeoff available.', leadTime: '4–6 wks', quoteTurnaround: '1–3 days', terms: 'Net 30', contacts: [{ name: 'Tom Vasquez', role: 'Specification Rep', phone: '(404) 555-0133', email: 'tvasquez@allegion.com' }] },
-  { id: 'v6', name: 'Sika Corporation', trade: 'Sealants & glazing supplies', about: 'Structural and weather sealants for glazing. Full technical support for spec compliance.', leadTime: '1–2 wks', quoteTurnaround: '1–2 days', terms: 'Net 30', contacts: [{ name: 'Priya Nair', role: 'Technical Rep', phone: '(864) 555-0162', email: 'pnair@sika.com' }] },
+type VendorLocation = {
+  id: string;
+  territory: string; // e.g. "Charlotte / Carolinas", "Atlanta / Southeast"
+  address: string;
+  phone: string;
+  contacts: Array<{ name: string; role: string; phone: string; email: string }>;
+};
+type Vendor = {
+  id: string; name: string; trade: string; about: string;
+  leadTime: string; quoteTurnaround: string;
+  materials: string[];
+  locations: VendorLocation[];
+};
+
+const VENDORS: Vendor[] = [
+  {
+    id: 'v1', name: 'Oldcastle BuildingEnvelope', trade: 'Glass',
+    about: 'National manufacturer of glass and glazing products. Primary supplier for large commercial projects. Spec-driven support team with full product documentation.',
+    leadTime: '8–12 wks', quoteTurnaround: '3–5 days', materials: ['Insulated glass units', 'Laminated glass', 'Tempered glass', 'Spandrel glass'],
+    locations: [
+      { id: 'v1l1', territory: 'Charlotte / Carolinas', address: '4800 E Independence Blvd, Charlotte, NC 28212', phone: '(704) 555-0100',
+        contacts: [{ name: 'Dana Pierce', role: 'Sales Rep', phone: '(704) 555-0182', email: 'dpierce@obe.com' }, { name: 'Marcus Trent', role: 'Technical Sales', phone: '(704) 555-0199', email: 'mtrent@obe.com' }] },
+      { id: 'v1l2', territory: 'Atlanta / Southeast', address: '1250 Northside Dr NW, Atlanta, GA 30318', phone: '(404) 555-0200',
+        contacts: [{ name: 'Renee Hollis', role: 'SE Regional Rep', phone: '(404) 555-0211', email: 'rhollis@obe.com' }] },
+    ],
+  },
+  {
+    id: 'v2', name: 'Kawneer', trade: 'Storefront & curtain wall',
+    about: 'Aluminum framing systems for curtain wall, storefront, and windows. Strong code compliance documentation and AAMA-tested system library.',
+    leadTime: '10–14 wks', quoteTurnaround: '4–7 days', materials: ['Curtain wall systems', 'Storefront framing', 'Window systems', 'Entrance systems'],
+    locations: [
+      { id: 'v2l1', territory: 'Southeast / All Territories', address: '555 Guthridge Ct, Norcross, GA 30092', phone: '(678) 555-0140',
+        contacts: [{ name: 'Sandra Lee', role: 'Regional Rep', phone: '(678) 555-0141', email: 'slee@kawneer.com' }, { name: 'Paul Mira', role: 'Specifications Manager', phone: '(678) 555-0155', email: 'pmira@kawneer.com' }] },
+    ],
+  },
+  {
+    id: 'v3', name: 'Arcadia', trade: 'Storefront & curtain wall',
+    about: 'Architectural aluminum products including curtain wall and storefront. Competitive pricing on custom profiles.',
+    leadTime: '6–10 wks', quoteTurnaround: '3–5 days', materials: ['Curtain wall systems', 'Storefront framing', 'Aluminum entrance systems', 'Custom profiles'],
+    locations: [
+      { id: 'v3l1', territory: 'Charlotte / Carolinas', address: '300 Resource Pkwy, Waxhaw, NC 28173', phone: '(704) 555-0150',
+        contacts: [{ name: 'James Ortega', role: 'Account Manager', phone: '(770) 555-0155', email: 'jortega@arcadia.com' }] },
+      { id: 'v3l2', territory: 'Atlanta / Georgia', address: '2800 Century Pkwy NE, Atlanta, GA 30345', phone: '(770) 555-0160',
+        contacts: [{ name: 'Cora Diaz', role: 'Sales Engineer', phone: '(770) 555-0161', email: 'cdiaz@arcadia.com' }] },
+    ],
+  },
+  {
+    id: 'v4', name: 'Firestone Building Products', trade: 'Metal panels',
+    about: 'Metal panel systems and facades. Known for warranty programs and installation support.',
+    leadTime: '6–8 wks', quoteTurnaround: '2–4 days', materials: ['Metal panel systems', 'Composite metal panels', 'Insulated metal panels'],
+    locations: [
+      { id: 'v4l1', territory: 'Nashville / Mid-South', address: '535 Marriott Dr, Nashville, TN 37214', phone: '(615) 555-0175',
+        contacts: [{ name: 'Lynn Cho', role: 'Sales', phone: '(615) 555-0177', email: 'lcho@firestone.com' }] },
+    ],
+  },
+  {
+    id: 'v5', name: 'Allegion', trade: 'Door hardware',
+    about: 'Commercial door hardware and access control. Full product schedule takeoff available on request.',
+    leadTime: '4–6 wks', quoteTurnaround: '1–3 days', materials: ['Door hardware', 'Locksets', 'Access control devices', 'Door closers', 'Exit devices'],
+    locations: [
+      { id: 'v5l1', territory: 'Charlotte / Carolinas', address: '11819 N Houston Rosslyn, Charlotte, NC 28269', phone: '(704) 555-0130',
+        contacts: [{ name: 'Tom Vasquez', role: 'Specification Rep', phone: '(404) 555-0133', email: 'tvasquez@allegion.com' }] },
+      { id: 'v5l2', territory: 'Atlanta / Southeast', address: '1 Allegion Way, Atlanta, GA 30301', phone: '(404) 555-0134',
+        contacts: [{ name: 'Mei-Ling Su', role: 'Regional Account Mgr', phone: '(404) 555-0138', email: 'msu@allegion.com' }] },
+    ],
+  },
+  {
+    id: 'v6', name: 'Sika Corporation', trade: 'Sealants & glazing supplies',
+    about: 'Structural and weather sealants for glazing. Full technical support for spec compliance.',
+    leadTime: '1–2 wks', quoteTurnaround: '1–2 days', materials: ['Structural sealants', 'Weather sealants', 'Fire-rated sealants', 'Glazing tape & accessories'],
+    locations: [
+      { id: 'v6l1', territory: 'Carolinas / Southeast', address: '201 Polito Ave, Lyndhurst, NJ 07071 (ships regionally)', phone: '(800) 933-7452',
+        contacts: [{ name: 'Priya Nair', role: 'Technical Rep', phone: '(864) 555-0162', email: 'pnair@sika.com' }] },
+    ],
+  },
 ];
 const VENDOR_TRADES = ['All trades', 'Glass', 'Storefront & curtain wall', 'Metal panels', 'Door hardware', 'Doors & entrances', 'Sealants & glazing supplies', 'Skylights & canopies', 'Railings & handrail', 'Louvers & sunshades', 'Fabrication & finishing'];
 
@@ -3382,20 +3920,1678 @@ const TRAINING_VIDEOS = [
 ];
 const TRAINING_FILTERS = ['All training', 'Bluebeam', 'Glazier Studio', 'Metal panels', 'AI', 'Microsoft Excel', 'Estimating basics'];
 
-function ResourcesView({ st, setSt }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person }) {
-  const cat = st.resCategory;
+// ─── Business Development Tab ─────────────────────────────────────────────────
+const BD_REPS: Array<{ id: BdRep; name: string; first: string; initials: string }> = [
+  { id: 'john',     name: 'John DiPaolo',     first: 'John',     initials: 'JD' },
+  { id: 'danielle', name: 'Danielle Benfield', first: 'Danielle', initials: 'DB' },
+  { id: 'jaramia',  name: 'Jaramia Staumpf',  first: 'Jaramia',  initials: 'JS' },
+  { id: 'newguy',   name: 'New Guy',           first: 'New',      initials: 'NG' },
+  { id: 'hot',      name: 'HOT PROJECTS',      first: 'Hot',      initials: '★' },
+];
+
+// BD follow-up date = bid date + 14 days
+function bdFollowUpDate(bidDateIso: string): string {
+  if (!bidDateIso) return '';
+  const d = new Date(bidDateIso + 'T12:00:00');
+  if (isNaN(d.getTime())) return '';
+  d.setDate(d.getDate() + 14);
+  return d.toISOString().slice(0, 10);
+}
+
+// Parse bid date string (could be "Sep 20" or "2026-09-20") to ISO
+function toIso(raw: string): string {
+  if (!raw) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const d = new Date(raw + ' 2026');
+  if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  return '';
+}
+
+// Effective follow-up: manual override takes priority, else auto bid date + 14d
+function effectiveFollowUp(bid: BidProject): string {
+  if (bid.followUpDate) return bid.followUpDate;
+  return bdFollowUpDate(toIso(bid.bidDate));
+}
+
+
+function BizDevView({ st, setSt, me, flash }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person; flash: (m: string) => void }) {
+  const rep = st.bdRep;
+  const subTab = st.bdSubTab;
+  const isHot = rep === 'hot';
+
+  // Hot: pending or review status bids
+  const HOT_STATUSES = new Set<BidStatus>(['pending', 'review']);
+  const visibleBids: BidProject[] = isHot
+    ? st.bidProjects.filter(b => !b.archived && HOT_STATUSES.has(b.status))
+    : st.bidProjects.filter(b => b.bd === rep);
+
+  // Sort by effective follow-up date ascending — overdue first
+  const today = new Date().toISOString().slice(0, 10);
+  const sorted = [...visibleBids].sort((a, b) => {
+    const fa = effectiveFollowUp(a) || '9999-99-99';
+    const fb = effectiveFollowUp(b) || '9999-99-99';
+    return fa.localeCompare(fb);
+  });
+
+  function patchBid(id: string, patch: Partial<BidProject>) {
+    setSt(s => ({ ...s, bidProjects: s.bidProjects.map(b => b.id === id ? { ...b, ...patch } : b) }));
+  }
+
+  const selectedBid = st.bidProjects.find(b => b.id === st.bdSelectedProject) || null;
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+      {/* Rep tabs strip */}
+      <div style={{ display: 'flex', borderBottom: '2px solid var(--color-text)', flexShrink: 0, background: 'var(--color-neutral-100)', overflowX: 'auto' }}>
+        {BD_REPS.map(r => {
+          const active = rep === r.id;
+          const count = r.id === 'hot'
+            ? st.bidProjects.filter(b => !b.archived && HOT_STATUSES.has(b.status)).length
+            : st.bidProjects.filter(b => b.bd === r.id).length;
+          return (
+            <button key={r.id} onClick={() => setSt(s => ({ ...s, bdRep: r.id, bdSubTab: 'projects', bdSelectedProject: null }))}
+              style={{ padding: '14px 22px', border: 'none', borderRight: '1px solid var(--color-divider)', background: active ? 'var(--color-text)' : 'transparent', color: active ? '#fff' : 'var(--color-text)', font: (active ? '700' : '500') + ' 11.5px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <span style={{ width: 24, height: 24, borderRadius: '50%', background: active ? 'rgba(255,255,255,.2)' : 'var(--color-neutral-300)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', font: '700 9px/1 var(--font-body)' }}>{r.initials}</span>
+              {r.name}
+              <span style={{ padding: '2px 6px', background: active ? 'rgba(255,255,255,.2)' : 'var(--color-neutral-200)', font: '700 9px/1 var(--font-body)', borderRadius: 2 }}>{count}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Hot CRM callout */}
+      {isHot && (
+        <div style={{ padding: '10px 24px', background: 'oklch(0.97 0.01 30)', borderBottom: '1px solid var(--color-divider)', font: '400 11.5px/1.4 var(--font-body)', color: 'var(--color-neutral-700)', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <span style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-accent)', flexShrink: 0 }}>CRM LINKED</span>
+          All <strong>Pending</strong> and <strong>In Review</strong> bids across all reps — sorted by follow-up date. Status syncs with the Bid Board.
+        </div>
+      )}
+
+      {/* Sub-tab bar */}
+      {!isHot && (
+        <div style={{ display: 'flex', borderBottom: '1px solid var(--color-divider)', flexShrink: 0, paddingLeft: 24 }}>
+          {([['projects', 'PROJECTS'], ['ainotes', 'AI NOTE TAKER'], ['calendar', 'CALENDAR']] as [BdSubTab, string][]).map(([id, label]) => (
+            <button key={id} onClick={() => setSt(s => ({ ...s, bdSubTab: id, bdSelectedProject: null }))}
+              style={{ padding: '10px 18px', border: 'none', borderBottom: subTab === id ? '3px solid var(--color-accent)' : '3px solid transparent', background: 'transparent', color: subTab === id ? 'var(--color-accent)' : 'var(--color-neutral-600)', font: (subTab === id ? '700' : '500') + ' 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>{label}</button>
+          ))}
+        </div>
+      )}
+
+      {/* Content */}
+      <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+        {(isHot || subTab === 'projects') && (
+          <BdProjectsPanel bids={sorted} today={today} selectedId={st.bdSelectedProject} repId={rep} isHot={isHot} me={me} flash={flash} setSt={setSt} patchBid={patchBid} />
+        )}
+        {!isHot && subTab === 'ainotes' && <BdAiNotesPanel rep={rep} st={st} setSt={setSt} me={me} flash={flash} bids={sorted} patchBid={patchBid} />}
+        {!isHot && subTab === 'calendar' && <BdCalendarPanel rep={rep} st={st} setSt={setSt} flash={flash} />}
+      </div>
+    </div>
+  );
+}
+
+// ── BD Projects Panel ──
+function BdProjectsPanel({ bids, today, selectedId, repId, isHot, me, flash, setSt, patchBid }: {
+  bids: BidProject[]; today: string; selectedId: string | null; repId: BdRep; isHot: boolean;
+  me: Person; flash: (m: string) => void;
+  setSt: React.Dispatch<React.SetStateAction<AppState>>;
+  patchBid: (id: string, p: Partial<BidProject>) => void;
+}) {
+  const [search, setSearch] = React.useState('');
+  const filtered = search ? bids.filter(b => b.name.toLowerCase().includes(search.toLowerCase()) || b.gc.toLowerCase().includes(search.toLowerCase())) : bids;
+  const selected = bids.find(b => b.id === selectedId) || null;
+
+  const STATUS_BG: Record<string, string> = { pending: 'var(--color-neutral-600)', accepted: '#1f7a4d', declined: 'var(--color-accent)', review: 'oklch(0.50 0.18 240)' };
+  const STATUS_LABEL: Record<string, string> = { pending: 'AWAITING', accepted: 'ACCEPTED', declined: 'DECLINED', review: 'IN REVIEW' };
+
+  // Compute week boundaries (Mon–Sun of current week)
+  const todayDate = new Date(today + 'T12:00:00');
+  const dow = todayDate.getDay(); // 0=Sun
+  const diffToMon = (dow === 0 ? -6 : 1 - dow);
+  const weekStart = new Date(todayDate); weekStart.setDate(todayDate.getDate() + diffToMon);
+  const weekEnd = new Date(weekStart); weekEnd.setDate(weekStart.getDate() + 6);
+  const nextWeekStart = new Date(weekEnd); nextWeekStart.setDate(weekEnd.getDate() + 1);
+  const nextWeekEnd = new Date(nextWeekStart); nextWeekEnd.setDate(nextWeekStart.getDate() + 6);
+  const ws = weekStart.toISOString().slice(0, 10);
+  const we = weekEnd.toISOString().slice(0, 10);
+  const nws = nextWeekStart.toISOString().slice(0, 10);
+  const nwe = nextWeekEnd.toISOString().slice(0, 10);
+
+  function fuGroup(b: BidProject): 'overdue' | 'thisweek' | 'nextweek' | 'upcoming' | 'none' {
+    const fu = effectiveFollowUp(b);
+    if (!fu) return 'none';
+    if (fu < today) return 'overdue';
+    if (fu >= ws && fu <= we) return 'thisweek';
+    if (fu >= nws && fu <= nwe) return 'nextweek';
+    return 'upcoming';
+  }
+
+  const GROUPS: Array<{ key: ReturnType<typeof fuGroup>; label: string; accent: string; bg: string; textColor: string; icon: string }> = [
+    { key: 'overdue',  label: 'FOLLOW-UPS PAST DUE',  accent: '#c0392b', bg: '#fff5f5', textColor: '#c0392b', icon: '⚠' },
+    { key: 'thisweek', label: 'FOLLOW-UPS THIS WEEK',  accent: '#b45309', bg: '#fffbf0', textColor: '#b45309', icon: '↻' },
+    { key: 'nextweek', label: 'FOLLOW-UPS NEXT WEEK',  accent: 'oklch(0.45 0.18 240)', bg: '#f0f5ff', textColor: 'oklch(0.45 0.18 240)', icon: '→' },
+    { key: 'upcoming', label: 'UPCOMING',              accent: 'var(--color-neutral-500)', bg: 'var(--color-neutral-100)', textColor: 'var(--color-neutral-600)', icon: '·' },
+    { key: 'none',     label: 'NO DATE SET',           accent: 'var(--color-neutral-400)', bg: 'var(--color-neutral-100)', textColor: 'var(--color-neutral-400)', icon: '—' },
+  ];
+
+  function BdProjectCard({ b, group }: { b: BidProject; group: typeof GROUPS[0] }) {
+    const fuDate = effectiveFollowUp(b);
+    const daysUntil = fuDate ? Math.round((new Date(fuDate + 'T12:00:00').getTime() - new Date(today + 'T12:00:00').getTime()) / 86400000) : null;
+    const isSelected = selectedId === b.id;
+    const fuLabel = !fuDate ? '' : daysUntil === 0 ? 'Today' : daysUntil! < 0 ? (Math.abs(daysUntil!) + 'd overdue') : ('in ' + daysUntil + 'd');
+    const fuFormatted = fuDate ? new Date(fuDate + 'T12:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) : '';
+    return (
+      <button onClick={() => setSt(s => ({ ...s, bdSelectedProject: b.id }))}
+        style={{ width: '100%', padding: '0', border: 'none', borderBottom: '1px solid ' + (group.key === 'overdue' ? '#fcc' : group.key === 'thisweek' ? '#ffe5b4' : 'var(--color-divider)'), borderLeft: isSelected ? '4px solid ' + group.accent : '4px solid transparent', background: isSelected ? '#fff' : 'transparent', textAlign: 'left', cursor: 'pointer', display: 'flex', flexDirection: 'column' }}>
+        {/* Follow-up date bar */}
+        {fuDate && (
+          <div style={{ padding: '7px 12px 5px', background: isSelected ? group.accent : (group.key === 'overdue' ? '#fde8e8' : group.key === 'thisweek' ? '#fef3e0' : group.key === 'nextweek' ? '#e8eeff' : 'transparent'), display: 'flex', alignItems: 'baseline', gap: 8, borderBottom: '1px solid ' + (group.key === 'overdue' ? '#fcc' : group.key === 'thisweek' ? '#ffe0a0' : group.key === 'nextweek' ? '#c8d8ff' : 'transparent') }}>
+            <span style={{ font: '800 15px/1 var(--font-body)', color: isSelected ? '#fff' : group.accent, letterSpacing: '-.01em' }}>{fuFormatted}</span>
+            {fuLabel && <span style={{ font: '600 10px/1 var(--font-body)', color: isSelected ? 'rgba(255,255,255,.8)' : group.textColor, letterSpacing: '.04em' }}>{fuLabel}</span>}
+          </div>
+        )}
+        {/* Project info */}
+        <div style={{ padding: '8px 12px 10px' }}>
+          <div style={{ font: '600 12.5px/1.2 var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}>{b.name}</div>
+          <div style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 5 }}>{b.gc}</div>
+          <span style={{ padding: '2px 6px', background: STATUS_BG[b.status] || 'var(--color-neutral-400)', color: '#fff', font: '700 8px/1 var(--font-body)', letterSpacing: '.06em' }}>{STATUS_LABEL[b.status] || b.status.toUpperCase()}</span>
+        </div>
+      </button>
+    );
+  }
+
+  const groupedFiltered = GROUPS.map(g => ({ ...g, items: filtered.filter(b => fuGroup(b) === g.key) })).filter(g => g.items.length > 0);
+
+  return (
+    <>
+      {/* List Rail */}
+      <div style={{ width: 300, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', background: 'var(--color-neutral-100)', overflow: 'hidden' }}>
+        <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--color-divider)', display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search projects…" style={{ ...inp, flex: 1, padding: '7px 10px' }} />
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {groupedFiltered.length === 0 && (
+            <div style={{ padding: 20, ...T.meta }}>{isHot ? 'No active bids.' : 'No projects assigned to this rep in the CRM.'}</div>
+          )}
+          {groupedFiltered.map(g => (
+            <div key={g.key}>
+              {/* Section header */}
+              <div style={{ padding: '8px 12px 6px', background: g.key === 'overdue' ? '#fde8e8' : g.key === 'thisweek' ? '#fef3e0' : g.key === 'nextweek' ? '#e8eeff' : 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid ' + (g.key === 'overdue' ? '#fcc' : g.key === 'thisweek' ? '#ffe0a0' : g.key === 'nextweek' ? '#c8d8ff' : 'var(--color-divider)'), position: 'sticky', top: 0, zIndex: 1 }}>
+                <span style={{ font: '800 9px/1 var(--font-body)', letterSpacing: '.14em', color: g.textColor }}>{g.label}</span>
+                <span style={{ font: '700 9px/1 var(--font-body)', padding: '2px 6px', background: g.accent, color: '#fff', borderRadius: 2 }}>{g.items.length}</span>
+              </div>
+              {g.items.map(b => <BdProjectCard key={b.id} b={b} group={g} />)}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Detail Panel */}
+      {selected
+        ? <BdBidDetail bid={selected} today={today} me={me} flash={flash} patchBid={patchBid} setSt={setSt} />
+        : <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ font: '400 32px/1', marginBottom: 10 }}>📋</div>
+              <div style={{ ...T.meta }}>Select a project to view full CRM details</div>
+            </div>
+          </div>
+      }
+    </>
+  );
+}
+
+// ── BD Bid Detail — read-only view; EDIT button unlocks editing ──
+function BdBidDetail({ bid, today, me, flash, patchBid, setSt }: {
+  bid: BidProject; today: string; me: Person; flash: (m: string) => void;
+  patchBid: (id: string, p: Partial<BidProject>) => void;
+  setSt: React.Dispatch<React.SetStateAction<AppState>>;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState<BidProject>(bid);
+  const [noteText, setNoteText] = React.useState('');
+  const [newLink, setNewLink] = React.useState('');
+
+  React.useEffect(() => { setDraft(bid); setEditing(false); setNoteText(''); setNewLink(''); }, [bid.id]);
+
+  function set<K extends keyof BidProject>(key: K, val: BidProject[K]) {
+    setDraft(d => ({ ...d, [key]: val }));
+  }
+
+  function save() {
+    patchBid(bid.id, draft);
+    setEditing(false);
+    flash('Project updated in CRM');
+  }
+
+  function discard() {
+    setDraft(bid);
+    setEditing(false);
+  }
+
+  function addNote() {
+    if (!noteText.trim()) return;
+    const when = new Date().toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+    const appended = bid.notes
+      ? bid.notes + '\n\n[' + when + ' · ' + me.first + '] ' + noteText.trim()
+      : '[' + when + ' · ' + me.first + '] ' + noteText.trim();
+    patchBid(bid.id, { notes: appended });
+    setNoteText('');
+    flash('Note saved');
+  }
+
+  function addLink() {
+    if (!newLink.trim()) return;
+    const links = [...(draft.planLinks || []), newLink.trim()];
+    set('planLinks', links);
+    setNewLink('');
+  }
+
+  function removeLink(idx: number) {
+    set('planLinks', (draft.planLinks || []).filter((_, i) => i !== idx));
+  }
+
+  const fuDate = effectiveFollowUp(bid);
+  const draftFuDate = effectiveFollowUp(draft);
+  const daysUntil = fuDate ? Math.round((new Date(fuDate + 'T12:00:00').getTime() - new Date(today + 'T12:00:00').getTime()) / 86400000) : null;
+  const fuOverdue = daysUntil !== null && daysUntil < 0;
+  const fuSoon = daysUntil !== null && daysUntil >= 0 && daysUntil <= 3;
+  const fuBg = fuOverdue ? 'var(--color-accent)' : fuSoon ? '#b45309' : 'var(--color-neutral-200)';
+  const fuCol = fuOverdue || fuSoon ? '#fff' : 'var(--color-text)';
+
+  const STATUS_BG: Record<string, string> = { pending: 'var(--color-neutral-600)', accepted: '#1f7a4d', declined: 'var(--color-accent)', review: 'oklch(0.50 0.18 240)' };
+  const STATUS_LABEL: Record<string, string> = { pending: 'Awaiting', accepted: 'Accepted', declined: 'Declined', review: 'In Review' };
+
+  // Read-only value display
+  const RV = ({ v, fallback = '—' }: { v?: string | null; fallback?: string }) => (
+    <span style={{ font: '500 13px/1.4 var(--font-body)', color: v ? 'var(--color-text)' : 'var(--color-neutral-400)' }}>{v || fallback}</span>
+  );
+
+  const displayLinks = bid.planLinks && bid.planLinks.length > 0 ? bid.planLinks : (bid.planRoom ? [bid.planRoom] : []);
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto', minHeight: 0, padding: '24px 32px', maxWidth: 820 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 8, flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <div style={{ font: '800 24px/1.1 var(--font-heading)', marginBottom: 4 }}>{bid.name}</div>
+          <div style={{ font: '500 12.5px/1 var(--font-body)', color: 'var(--color-neutral-600)' }}>{bid.gc}{bid.location ? ' · ' + bid.location : ''}</div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+          {/* Status badge — read-only in view mode, dropdown in edit */}
+          {editing ? (
+            <select value={draft.status} onChange={e => set('status', e.target.value as BidStatus)}
+              style={{ ...inp, padding: '7px 12px', appearance: 'none', background: STATUS_BG[draft.status] || 'var(--color-neutral-600)', color: '#fff', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', border: 'none', cursor: 'pointer' }}>
+              {(['pending', 'review', 'accepted', 'declined'] as BidStatus[]).map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
+            </select>
+          ) : (
+            <span style={{ padding: '7px 14px', background: STATUS_BG[bid.status] || 'var(--color-neutral-600)', color: '#fff', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em' }}>{STATUS_LABEL[bid.status] || bid.status.toUpperCase()}</span>
+          )}
+          {editing ? (
+            <>
+              <button onClick={save} style={{ padding: '8px 18px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>SAVE TO CRM</button>
+              <button onClick={discard} style={{ padding: '8px 14px', background: 'none', border: '1px solid var(--color-divider)', font: '600 11px/1 var(--font-body)', cursor: 'pointer' }}>DISCARD</button>
+            </>
+          ) : (
+            <button onClick={() => setEditing(true)} style={{ padding: '8px 18px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>EDIT CRM</button>
+          )}
+        </div>
+      </div>
+
+      {/* Follow-up banner */}
+      <div style={{ padding: '10px 14px', background: fuBg, color: fuCol, display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+        <span style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.1em' }}>FOLLOW-UP</span>
+        {fuDate ? (
+          <>
+            <span style={{ font: '600 13px/1 var(--font-body)' }}>{new Date(fuDate + 'T12:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</span>
+            <span style={{ font: '500 11px/1 var(--font-body)', opacity: .85 }}>{'(' + (daysUntil === 0 ? 'Today' : fuOverdue ? (Math.abs(daysUntil!) + 'd overdue') : ('in ' + daysUntil + 'd')) + ')'}</span>
+            {!bid.followUpDate && <span style={{ font: '400 10px/1 var(--font-body)', opacity: .65 }}>auto · 14d after bid date</span>}
+            {bid.followUpDate && <span style={{ font: '400 10px/1 var(--font-body)', opacity: .65 }}>custom date</span>}
+          </>
+        ) : <span style={{ font: '400 12px/1 var(--font-body)' }}>No bid date set</span>}
+        {editing && (
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.08em', color: fuCol, opacity: .9 }}>OVERRIDE DATE</label>
+            <input type="date" value={draft.followUpDate || draftFuDate || ''} onChange={e => set('followUpDate', e.target.value || undefined as unknown as string)}
+              style={{ padding: '4px 8px', border: '1px solid rgba(255,255,255,.4)', background: 'rgba(255,255,255,.15)', color: fuCol, font: '600 11px/1 var(--font-body)', cursor: 'pointer' }} />
+            {draft.followUpDate && (
+              <button onClick={() => set('followUpDate', undefined as unknown as string)} style={{ padding: '4px 8px', background: 'rgba(255,255,255,.2)', border: 'none', color: fuCol, font: '600 10px/1 var(--font-body)', cursor: 'pointer' }}>RESET AUTO</button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* CRM Fields — read-only grid or edit grid */}
+      {editing ? (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, marginBottom: 20 }}>
+          <div style={{ gridColumn: '1/-1' }}>
+            <Field label="SCOPE / DESCRIPTION">
+              <textarea value={draft.scope} onChange={e => set('scope', e.target.value)} style={{ ...inp, minHeight: 72, resize: 'vertical', padding: '8px 10px' }} />
+            </Field>
+          </div>
+          <Field label="BID DATE">
+            <input type="date" value={toIso(draft.bidDate)} onChange={e => set('bidDate', e.target.value)} style={{ ...inp, padding: '8px 10px' }} />
+          </Field>
+          <Field label="DRAWING LEVEL">
+            <select value={draft.level} onChange={e => set('level', e.target.value)} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+              {BID_LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
+            </select>
+          </Field>
+          <Field label="LOCATION">
+            <input value={draft.location} onChange={e => set('location', e.target.value)} style={{ ...inp, padding: '8px 10px' }} />
+          </Field>
+          <Field label="TYPE OF BID">
+            <select value={draft.typeBid || ''} onChange={e => set('typeBid', e.target.value as import('./data').BidTypeBid)} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+              <option value="">—</option>
+              {(['Negotiated','Hard Bid','Design-Build','CM at Risk','Other'] as import('./data').BidTypeBid[]).map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </Field>
+          <Field label="WORK TYPE">
+            <select value={draft.workType || ''} onChange={e => set('workType', e.target.value as import('./data').BidWorkType)} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+              <option value="">—</option>
+              {(['Curtain Wall','Storefront','Window Wall','Entrances & Doors','Skylights','Glass Partitions','ACM / Cladding','Mixed Scope','Other'] as import('./data').BidWorkType[]).map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </Field>
+          <Field label="BUILDING TYPE">
+            <select value={draft.buildingType || ''} onChange={e => set('buildingType', e.target.value as import('./data').BidBuildingType)} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+              <option value="">—</option>
+              {(['Office','Healthcare','Education','Hospitality','Retail','Industrial','Multi-Family Residential','Mixed-Use','Government','Data Center','Other'] as import('./data').BidBuildingType[]).map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </Field>
+          <Field label="CONSTRUCTION TYPE">
+            <select value={draft.typeConstruction || ''} onChange={e => set('typeConstruction', e.target.value as import('./data').BidTypeConstruction)} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+              <option value="">—</option>
+              {(['New Construction','Renovation','Upfit','Other'] as import('./data').BidTypeConstruction[]).map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </Field>
+          <Field label="CLIENT TIER">
+            <select value={draft.clientTier || ''} onChange={e => set('clientTier', e.target.value as import('./data').BidClientTier)} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+              <option value="">—</option>
+              {(['1','2','3','4'] as import('./data').BidClientTier[]).map(v => <option key={v} value={v}>{'Tier ' + v}</option>)}
+            </select>
+          </Field>
+          <Field label="OFFICE">
+            <select value={draft.office || ''} onChange={e => set('office', e.target.value as import('./data').BidOffice)} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+              <option value="">—</option>
+              {(['Charlotte','Atlanta','Charleston'] as import('./data').BidOffice[]).map(v => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </Field>
+          <Field label="JOB SIZE">
+            <select value={draft.jobSize || ''} onChange={e => set('jobSize', e.target.value as 'large'|'medium'|'small')} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+              <option value="">—</option>
+              <option value="large">Large</option>
+              <option value="medium">Medium</option>
+              <option value="small">Small</option>
+            </select>
+          </Field>
+          <Field label="BD CONTACT">
+            <select value={draft.bd || ''} onChange={e => set('bd', e.target.value)} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+              {BD_TEAM.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
+          </Field>
+          <div style={{ gridColumn: '1/-1' }}>
+            <Field label="PLAN ROOM / LINKS">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {(draft.planLinks && draft.planLinks.length > 0 ? draft.planLinks : (draft.planRoom ? [draft.planRoom] : [])).map((link, idx) => (
+                  <div key={idx} style={{ display: 'flex', gap: 6 }}>
+                    <input value={link} onChange={e => {
+                      const links = [...(draft.planLinks || (draft.planRoom ? [draft.planRoom] : []))];
+                      links[idx] = e.target.value;
+                      set('planLinks', links);
+                    }} style={{ ...inp, flex: 1, padding: '7px 10px', fontSize: 12 }} />
+                    <button onClick={() => removeLink(idx)} style={{ padding: '7px 10px', background: 'var(--color-neutral-200)', border: 'none', font: '700 11px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-accent)' }}>✕</button>
+                  </div>
+                ))}
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input value={newLink} onChange={e => setNewLink(e.target.value)} onKeyDown={e => e.key === 'Enter' && addLink()} placeholder="https://… (Enter to add)" style={{ ...inp, flex: 1, padding: '7px 10px', fontSize: 12 }} />
+                  <button onClick={addLink} style={{ padding: '7px 12px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 10px/1 var(--font-body)', cursor: 'pointer' }}>+ ADD</button>
+                </div>
+              </div>
+            </Field>
+          </div>
+          {draft.info !== undefined && (
+            <div style={{ gridColumn: '1/-1' }}>
+              <Field label="PROJECT INFO">
+                <textarea value={draft.info} onChange={e => set('info', e.target.value)} style={{ ...inp, minHeight: 72, resize: 'vertical', padding: '8px 10px' }} />
+              </Field>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* ── READ-ONLY VIEW ── */
+        <div style={{ marginBottom: 24 }}>
+          {bid.scope && (
+            <div style={{ padding: '12px 14px', background: 'var(--color-neutral-100)', border: '1px solid var(--color-divider)', marginBottom: 16 }}>
+              <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-500)', marginBottom: 6 }}>SCOPE</div>
+              <div style={{ font: '400 13px/1.6 var(--font-body)' }}>{bid.scope}</div>
+            </div>
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 1, border: '1px solid var(--color-divider)', background: 'var(--color-divider)', marginBottom: 16 }}>
+            {[
+              ['BID DATE', bid.bidDate ? new Date(toIso(bid.bidDate) + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : ''],
+              ['DRAWING LEVEL', bid.level],
+              ['LOCATION', bid.location],
+              ['TYPE OF BID', bid.typeBid],
+              ['WORK TYPE', bid.workType],
+              ['BUILDING TYPE', bid.buildingType],
+              ['CONSTRUCTION TYPE', bid.typeConstruction],
+              ['CLIENT TIER', bid.clientTier ? 'Tier ' + bid.clientTier : ''],
+              ['OFFICE', bid.office],
+              ['JOB SIZE', bid.jobSize ? bid.jobSize.charAt(0).toUpperCase() + bid.jobSize.slice(1) : ''],
+              ['BD CONTACT', BD_TEAM.find(t => t.id === bid.bd)?.name || ''],
+              ['MANAGER', bid.manager || ''],
+            ].map(([label, val]) => (
+              <div key={label} style={{ padding: '10px 12px', background: 'var(--color-bg)' }}>
+                <div style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-500)', marginBottom: 5 }}>{label}</div>
+                <RV v={val} />
+              </div>
+            ))}
+          </div>
+          {/* Plan links */}
+          {displayLinks.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-500)', marginBottom: 8 }}>PLAN ROOM / LINKS</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {displayLinks.map((link, i) => (
+                  <a key={i} href={link} target="_blank" rel="noreferrer"
+                    style={{ font: '500 12.5px/1 var(--font-body)', color: 'var(--color-accent)', textDecoration: 'none', padding: '8px 12px', border: '1px solid var(--color-divider)', background: 'var(--color-neutral-100)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    ↗ {link}
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+          {bid.info && (
+            <div style={{ padding: '12px 14px', background: 'var(--color-neutral-100)', border: '1px solid var(--color-divider)', marginBottom: 16 }}>
+              <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-500)', marginBottom: 6 }}>PROJECT INFO</div>
+              <div style={{ font: '400 13px/1.6 var(--font-body)' }}>{bid.info}</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* GC Contacts */}
+      {bid.gcs?.filter(g => g.company).length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 10 }}>GC CONTACTS</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 0, border: '1px solid var(--color-divider)' }}>
+            {bid.gcs.filter(g => g.company).map((g, i) => (
+              <div key={i} style={{ padding: '12px 14px', borderBottom: i < bid.gcs.filter(x => x.company).length - 1 ? '1px solid var(--color-divider)' : 'none', display: 'flex', gap: 14, alignItems: 'center' }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ font: '600 13px/1.2 var(--font-body)' }}>{g.company}<span style={{ font: '400 11.5px/1', color: 'var(--color-neutral-500)', marginLeft: 8 }}>{g.location}</span></div>
+                  {g.contactName && <div style={{ font: '500 12px/1 var(--font-body)', marginTop: 3 }}>{g.contactName}<span style={{ font: '400 11px/1', color: 'var(--color-neutral-600)', marginLeft: 8 }}>{g.contactTitle}</span></div>}
+                  {/* Plan link per GC */}
+                  {displayLinks[i] && (
+                    <a href={displayLinks[i]} target="_blank" rel="noreferrer" style={{ font: '500 11px/1 var(--font-body)', color: 'var(--color-accent)', textDecoration: 'none', marginTop: 4, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>↗ Plan Room</a>
+                  )}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end', flexShrink: 0 }}>
+                  {g.contactEmail && <a href={'mailto:'+g.contactEmail} style={{ font: '600 11.5px/1 var(--font-body)', color: 'var(--color-accent)', textDecoration: 'none' }}>{g.contactEmail}</a>}
+                  {g.contactPhone && <a href={'tel:'+g.contactPhone} style={{ font: '400 12px/1 var(--font-body)', textDecoration: 'none', color: 'var(--color-text)' }}>{g.contactPhone}</a>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Proposal Pricing */}
+      {(bid.price || bid.cost || (bid.revisions && bid.revisions.length > 0)) && (
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 12 }}>PROPOSAL PRICING</div>
+
+          {/* Current price summary */}
+          {(bid.price || bid.cost) && (
+            <div style={{ display: 'flex', gap: 1, marginBottom: 16, background: 'var(--color-divider)' }}>
+              <div style={{ flex: 1, padding: '16px 18px', background: 'var(--color-text)', color: '#fff' }}>
+                <div style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.14em', opacity: .65, marginBottom: 8 }}>SELL PRICE</div>
+                <div style={{ font: '800 28px/1 var(--font-heading)', letterSpacing: '-.02em' }}>{bid.price ? money(num(bid.price)) : '—'}</div>
+              </div>
+              <div style={{ flex: 1, padding: '16px 18px', background: 'var(--color-neutral-100)' }}>
+                <div style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-500)', marginBottom: 8 }}>EST. COST</div>
+                <div style={{ font: '800 28px/1 var(--font-heading)', letterSpacing: '-.02em' }}>{bid.cost ? money(num(bid.cost)) : '—'}</div>
+              </div>
+              {bid.price && bid.cost && (
+                <>
+                  <div style={{ flex: 1, padding: '16px 18px', background: 'var(--color-neutral-100)' }}>
+                    <div style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-500)', marginBottom: 8 }}>GROSS MARGIN</div>
+                    <div style={{ font: '800 28px/1 var(--font-heading)', letterSpacing: '-.02em', color: gpNum(bid.price, bid.cost) >= 0.18 ? '#1f7a4d' : gpNum(bid.price, bid.cost) >= 0.10 ? '#b45309' : 'var(--color-accent)' }}>{gpPct(bid.price, bid.cost)}</div>
+                  </div>
+                  <div style={{ flex: 1, padding: '16px 18px', background: 'var(--color-neutral-100)' }}>
+                    <div style={{ font: '700 9px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-500)', marginBottom: 8 }}>GROSS PROFIT</div>
+                    <div style={{ font: '800 28px/1 var(--font-heading)', letterSpacing: '-.02em' }}>{money(num(bid.price) - num(bid.cost))}</div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Edit pricing in edit mode */}
+          {editing && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+              <Field label="SELL PRICE ($)">
+                <input value={draft.price || ''} onChange={e => set('price', e.target.value)} placeholder="e.g. 1250000" style={{ ...inp, padding: '8px 10px' }} />
+              </Field>
+              <Field label="EST. COST ($)">
+                <input value={draft.cost || ''} onChange={e => set('cost', e.target.value)} placeholder="e.g. 980000" style={{ ...inp, padding: '8px 10px' }} />
+              </Field>
+            </div>
+          )}
+
+          {/* Revisions table */}
+          {bid.revisions && bid.revisions.length > 0 && (
+            <>
+              <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-500)', marginBottom: 8 }}>REVISION HISTORY</div>
+              <div style={{ border: '1px solid var(--color-divider)', overflow: 'hidden' }}>
+                {/* Header */}
+                <div style={{ display: 'grid', gridTemplateColumns: '48px 1fr 120px 120px 60px', background: 'var(--color-text)', color: '#fff', padding: '8px 12px', gap: 12, font: '700 9px/1 var(--font-body)', letterSpacing: '.12em' }}>
+                  <span>REV</span><span>LABEL</span><span>SELL PRICE</span><span>EST. COST</span><span>GM %</span>
+                </div>
+                {bid.revisions.map((r, i) => {
+                  const isLatest = i === bid.revisions!.length - 1;
+                  return (
+                    <div key={i} style={{ borderTop: i === 0 ? 'none' : '1px solid var(--color-divider)', background: isLatest ? 'oklch(0.97 0.01 30)' : 'var(--color-bg)' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: '48px 1fr 120px 120px 60px', padding: '10px 12px', gap: 12, alignItems: 'center' }}>
+                        <span style={{ font: '800 11px/1 var(--font-body)', color: isLatest ? 'var(--color-accent)' : 'var(--color-neutral-500)', letterSpacing: '.04em' }}>{r.rev}</span>
+                        <div>
+                          <span style={{ font: '600 12.5px/1 var(--font-body)' }}>{r.label}</span>
+                          {isLatest && <span style={{ marginLeft: 8, padding: '2px 6px', background: 'var(--color-accent)', color: '#fff', font: '700 8px/1 var(--font-body)', letterSpacing: '.06em' }}>CURRENT</span>}
+                        </div>
+                        <span style={{ font: '600 12.5px/1 var(--font-heading)' }}>{money(num(r.price))}</span>
+                        <span style={{ font: '500 12px/1 var(--font-body)', color: 'var(--color-neutral-600)' }}>{money(num(r.cost))}</span>
+                        <span style={{ font: '700 12px/1 var(--font-body)', color: gpNum(r.price, r.cost) >= 0.18 ? '#1f7a4d' : gpNum(r.price, r.cost) >= 0.10 ? '#b45309' : 'var(--color-accent)' }}>{gpPct(r.price, r.cost)}</span>
+                      </div>
+                      {r.note && (
+                        <div style={{ padding: '0 12px 10px 60px', font: '400 11.5px/1.5 var(--font-body)', color: 'var(--color-neutral-600)' }}>{r.note}</div>
+                      )}
+                      <div style={{ padding: '0 12px 8px 60px', font: '400 10.5px/1 var(--font-body)', color: 'var(--color-neutral-400)' }}>{r.when} · {r.who}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {/* Add revision in edit mode */}
+          {editing && (() => {
+            const [newRev, setNewRev] = React.useState<Revision>({ rev: 'R' + (bid.revisions?.length || 0), label: '', price: '', cost: '', when: new Date().toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), who: me.first, note: '' });
+            return (
+              <div style={{ marginTop: 12, padding: '14px', border: '1px dashed var(--color-divider)', background: 'var(--color-neutral-100)' }}>
+                <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-500)', marginBottom: 10 }}>ADD REVISION</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '80px 1fr 130px 130px', gap: 8, marginBottom: 8 }}>
+                  <input value={newRev.rev} onChange={e => setNewRev(r => ({ ...r, rev: e.target.value }))} placeholder="R0" style={{ ...inp, padding: '7px 8px' }} />
+                  <input value={newRev.label} onChange={e => setNewRev(r => ({ ...r, label: e.target.value }))} placeholder="Label (e.g. VE Alternate)" style={{ ...inp, padding: '7px 8px' }} />
+                  <input value={newRev.price} onChange={e => setNewRev(r => ({ ...r, price: e.target.value }))} placeholder="Sell price $" style={{ ...inp, padding: '7px 8px' }} />
+                  <input value={newRev.cost} onChange={e => setNewRev(r => ({ ...r, cost: e.target.value }))} placeholder="Est. cost $" style={{ ...inp, padding: '7px 8px' }} />
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input value={newRev.note} onChange={e => setNewRev(r => ({ ...r, note: e.target.value }))} placeholder="Revision note…" style={{ ...inp, flex: 1, padding: '7px 8px' }} />
+                  <button onClick={() => {
+                    if (!newRev.label) return;
+                    const revs = [...(draft.revisions || []), { ...newRev }];
+                    set('revisions', revs);
+                    if (newRev.price) set('price', newRev.price);
+                    if (newRev.cost) set('cost', newRev.cost);
+                    setNewRev({ rev: 'R' + revs.length, label: '', price: '', cost: '', when: new Date().toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), who: me.first, note: '' });
+                  }} style={{ padding: '7px 16px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 10px/1 var(--font-body)', cursor: 'pointer', whiteSpace: 'nowrap' }}>+ ADD REV</button>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Notes */}
+      <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 12 }}>NOTES</div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <textarea value={noteText} onChange={e => setNoteText(e.target.value)} placeholder="Add a note — visible to BD and estimating team…" style={{ ...inp, flex: 1, minHeight: 68, resize: 'vertical', padding: '8px 10px' }} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) addNote(); }} />
+        <button onClick={addNote} style={{ padding: '10px 14px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 10px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', alignSelf: 'flex-start', whiteSpace: 'nowrap' }}>ADD NOTE</button>
+      </div>
+      {bid.notes ? (
+        <div style={{ font: '400 12.5px/1.7 var(--font-body)', color: 'var(--color-neutral-700)', padding: '12px 14px', background: 'var(--color-neutral-100)', border: '1px solid var(--color-divider)', whiteSpace: 'pre-wrap' }}>{bid.notes}</div>
+      ) : (
+        <div style={{ ...T.meta }}>No notes yet.</div>
+      )}
+    </div>
+  );
+}
+
+// ── BD AI Note Taker Panel ──
+function BdAiNotesPanel({ rep, st, setSt, me, flash, bids, patchBid }: {
+  rep: BdRep; st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>;
+  me: Person; flash: (m: string) => void;
+  bids: BidProject[]; patchBid: (id: string, p: Partial<BidProject>) => void;
+}) {
+  const mediaRef = React.useRef<MediaRecorder | null>(null);
+  const chunksRef = React.useRef<Blob[]>([]);
+  const [elapsed, setElapsed] = React.useState(0);
+  const timerRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+  const [targetBidId, setTargetBidId] = React.useState(bids[0]?.id || '');
+  const [editNotes, setEditNotes] = React.useState<string[]>([]);
+
+  const state = st.bdMeetingState;
+  const draft = st.bdMeetingDraft;
+
+  React.useEffect(() => {
+    if (draft && draft.repId === rep) setEditNotes(draft.notes);
+  }, [draft]);
+
+  const fmtElapsed = (s: number) => `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`;
+
+  async function startRecording() {
+    try {
+      const displayStream = await (navigator.mediaDevices as MediaDevices & { getDisplayMedia: (c: MediaStreamConstraints) => Promise<MediaStream> }).getDisplayMedia({ audio: true, video: false });
+      const audioTracks = displayStream.getAudioTracks();
+      if (!audioTracks.length) { displayStream.getTracks().forEach(t => t.stop()); flash('No audio track — check "Share system audio"'); return; }
+      const stream = new MediaStream(audioTracks);
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/ogg';
+      const mr = new MediaRecorder(stream, { mimeType });
+      chunksRef.current = [];
+      mr.ondataavailable = e => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mr.onstop = () => { stream.getTracks().forEach(t => t.stop()); displayStream.getTracks().forEach(t => t.stop()); processRecording(); };
+      mr.start(1000);
+      mediaRef.current = mr;
+      setElapsed(0);
+      timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
+      setSt(s => ({ ...s, bdMeetingState: 'recording' }));
+    } catch { flash('Could not capture audio — allow screen sharing and check "Share system audio"'); }
+  }
+
+  function stopRecording() {
+    if (timerRef.current) clearInterval(timerRef.current);
+    mediaRef.current?.stop();
+    setSt(s => ({ ...s, bdMeetingState: 'processing' }));
+  }
+
+  async function processRecording() {
+    const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+    let notes: string[] = [];
+    let transcript = '';
+
+    const apiKey = import.meta.env.VITE_OPENAI_API_KEY as string | undefined;
+    if (apiKey) {
+      try {
+        const form = new FormData();
+        form.append('file', blob, 'bdmeeting.webm');
+        form.append('model', 'whisper-1');
+        const r = await fetch('https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + apiKey }, body: form });
+        const json = await r.json();
+        transcript = json.text || '';
+        const gpt = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'system', content: 'You are helping a business development team summarize meeting notes. Extract key takeaways, client interests, next steps, and relationship updates from this transcript. Return JSON: {"notes":["...", "..."]}' }, { role: 'user', content: transcript }],
+            response_format: { type: 'json_object' },
+          }),
+        });
+        const gptJson = await gpt.json();
+        const parsed = JSON.parse(gptJson.choices?.[0]?.message?.content || '{}');
+        notes = parsed.notes || [];
+      } catch { notes = ['(Transcription failed — check your OpenAI API key)']; }
+    } else {
+      transcript = '[Demo] No OpenAI key. Simulated BD meeting with client contact at Turner Construction. Discussed upcoming hospital project in Charlotte.';
+      notes = [
+        'Turner Construction interested in bidding the new Atrium hospital project — scope includes curtain wall + storefront.',
+        'Client requested preliminary budget numbers by end of month.',
+        'Next step: schedule a site walkthrough for Q4. Contact: Mike Reynolds at Turner Charlotte.',
+      ];
+    }
+    setSt(s => ({ ...s, bdMeetingState: 'confirming', bdMeetingDraft: { transcript, notes, repId: rep } }));
+    setEditNotes(notes);
+  }
+
+  function confirmAndAdd() {
+    const bid = bids.find(b => b.id === targetBidId);
+    if (!bid && bids.length > 0) return;
+    const when = new Date().toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+    if (bid) {
+      const noteLines = editNotes.map(text => '[' + when + ' · ' + me.first + ' (AI)] ' + text).join('\n\n');
+      patchBid(bid.id, { notes: bid.notes ? bid.notes + '\n\n' + noteLines : noteLines });
+    }
+    setSt(s => ({ ...s, bdMeetingState: 'idle', bdMeetingDraft: null }));
+    flash(`AI notes added to ${bid?.name || 'project'}`);
+  }
+
+  return (
+    <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+      {/* History rail */}
+      <div style={{ width: 260, flexShrink: 0, borderRight: '2px solid var(--color-text)', background: 'var(--color-neutral-100)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ padding: '14px 16px', borderBottom: '2px solid var(--color-text)', font: '800 14px/1 var(--font-heading)' }}>AI Note Taker</div>
+        <div style={{ padding: '10px 16px 6px', font: '600 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-600)' }}>BIDS ({bids.length})</div>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {bids.map(b => (
+            <button key={b.id} onClick={() => setTargetBidId(b.id)} style={{ width: '100%', padding: '10px 16px', border: 'none', borderBottom: '1px solid var(--color-divider)', borderLeft: targetBidId === b.id ? '3px solid var(--color-accent)' : '3px solid transparent', background: 'transparent', textAlign: 'left', cursor: 'pointer' }}>
+              <div style={{ font: '600 12.5px/1.2 var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</div>
+              <div style={{ font: '400 10.5px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 3 }}>{b.gc}</div>
+            </button>
+          ))}
+          {bids.length === 0 && <div style={{ padding: 16, ...T.meta }}>No bids assigned to this rep.</div>}
+        </div>
+      </div>
+
+      {/* Main recorder panel */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        {state === 'idle' && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 24, padding: 48 }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ font: '800 26px/1.1 var(--font-heading)', marginBottom: 10 }}>Record a BD Meeting</div>
+              <div style={{ font: '400 13px/1.6 var(--font-body)', color: 'var(--color-neutral-600)', maxWidth: 400 }}>Capture client calls and site visits. AI extracts key notes and next steps and attaches them to the selected bid.</div>
+            </div>
+            {bids.length > 0 && (
+              <div style={{ width: '100%', maxWidth: 360 }}>
+                <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', marginBottom: 8 }}>ATTACH NOTES TO</div>
+                <select value={targetBidId} onChange={e => setTargetBidId(e.target.value)} style={{ ...inp, padding: '9px 12px', appearance: 'none', width: '100%' }}>
+                  {bids.map(b => <option key={b.id} value={b.id}>{b.name} — {b.gc}</option>)}
+                </select>
+              </div>
+            )}
+            <button onClick={startRecording} style={{ padding: '16px 36px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '700 14px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span style={{ fontSize: 20 }}>⏺</span> START RECORDING
+            </button>
+            <div style={{ padding: '10px 18px', background: 'var(--color-neutral-200)', border: '1px solid var(--color-divider)', maxWidth: 400 }}>
+              <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', marginBottom: 5 }}>HOW IT WORKS</div>
+              <div style={{ font: '400 11.5px/1.6 var(--font-body)', color: 'var(--color-neutral-700)' }}>Select your screen or window and check <strong>"Share system audio"</strong> when prompted. Works with Teams, Zoom, phone calls, or any audio.</div>
+            </div>
+          </div>
+        )}
+
+        {state === 'recording' && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 28 }}>
+            <div style={{ width: 80, height: 80, borderRadius: '50%', background: 'var(--color-accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: 'pulse 1.5s infinite' }}>
+              <span style={{ fontSize: 32, color: '#fff' }}>⏺</span>
+            </div>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ font: '800 36px/1 var(--font-heading)', fontVariantNumeric: 'tabular-nums', color: 'var(--color-accent)' }}>{fmtElapsed(elapsed)}</div>
+              <div style={{ font: '500 12px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 8, letterSpacing: '.1em' }}>RECORDING · SYSTEM AUDIO</div>
+            </div>
+            <button onClick={stopRecording} style={{ padding: '13px 32px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 13px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>⏹ STOP &amp; PROCESS</button>
+          </div>
+        )}
+
+        {state === 'processing' && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 20 }}>
+            <div style={{ font: '800 22px/1 var(--font-heading)' }}>Transcribing &amp; analyzing…</div>
+            <div style={{ font: '400 13px/1.5 var(--font-body)', color: 'var(--color-neutral-600)' }}>Extracting BD notes from your meeting. This may take a moment.</div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              {[0, 1, 2].map(i => <div key={i} style={{ width: 10, height: 10, background: 'var(--color-accent)', borderRadius: '50%', animation: `bounce 1.2s ${i * 0.2}s infinite` }} />)}
+            </div>
+          </div>
+        )}
+
+        {state === 'confirming' && draft && (
+          <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px', maxWidth: 680 }}>
+            <div style={{ font: '800 20px/1 var(--font-heading)', marginBottom: 20 }}>Review AI Notes</div>
+            {bids.length > 0 && (
+              <div style={{ marginBottom: 20 }}>
+                <Field label="ATTACH TO BID">
+                  <select value={targetBidId} onChange={e => setTargetBidId(e.target.value)} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+                    {bids.map(b => <option key={b.id} value={b.id}>{b.name} — {b.gc}</option>)}
+                  </select>
+                </Field>
+              </div>
+            )}
+            <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 12 }}>EXTRACTED NOTES ({editNotes.length})</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+              {editNotes.map((note, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <textarea value={note} onChange={e => { const n = [...editNotes]; n[i] = e.target.value; setEditNotes(n); }} style={{ ...inp, flex: 1, minHeight: 56, resize: 'vertical', padding: '8px 10px', font: '400 12.5px/1.5 var(--font-body)' }} />
+                  <button onClick={() => setEditNotes(editNotes.filter((_, j) => j !== i))} style={{ padding: '6px 10px', background: 'none', border: '1px solid var(--color-divider)', cursor: 'pointer', color: 'var(--color-neutral-500)', font: '400 13px/1' }}>✕</button>
+                </div>
+              ))}
+              <button onClick={() => setEditNotes([...editNotes, ''])} style={{ padding: '7px 14px', background: 'none', border: '1px dashed var(--color-neutral-400)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', alignSelf: 'flex-start' }}>+ ADD NOTE</button>
+            </div>
+            {draft.transcript && (
+              <details style={{ marginBottom: 20 }}>
+                <summary style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>VIEW TRANSCRIPT</summary>
+                <div style={{ marginTop: 10, padding: '12px 14px', background: 'var(--color-neutral-100)', font: '400 11.5px/1.7 var(--font-body)', color: 'var(--color-neutral-700)', whiteSpace: 'pre-wrap', maxHeight: 240, overflowY: 'auto', border: '1px solid var(--color-divider)' }}>{draft.transcript}</div>
+              </details>
+            )}
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={confirmAndAdd} style={{ padding: '10px 24px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 12px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>ADD TO BID</button>
+              <button onClick={() => setSt(s => ({ ...s, bdMeetingState: 'idle', bdMeetingDraft: null }))} style={{ padding: '10px 16px', background: 'none', border: '1px solid var(--color-divider)', font: '600 12px/1 var(--font-body)', cursor: 'pointer' }}>DISCARD</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── BD Calendar Panel ──
+function BdCalendarPanel({ rep, st, setSt, flash }: { rep: BdRep; st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; flash: (m: string) => void }) {
+  const today = new Date();
+  const [viewMonth, setViewMonth] = React.useState(today.getMonth());
+  const [viewYear, setViewYear] = React.useState(today.getFullYear());
+  const [showAdd, setShowAdd] = React.useState(false);
+  const [addDate, setAddDate] = React.useState('');
+  const [draft, setDraft] = React.useState({ title: '', time: '', note: '' });
+  const [selectedDate, setSelectedDate] = React.useState<string | null>(null);
+
+  const events: BdCalendarEvent[] = st.bdCalendar[rep] || [];
+
+  function addEvent() {
+    if (!draft.title.trim() || !addDate) return;
+    const evt: BdCalendarEvent = { id: 'bce' + Date.now(), title: draft.title.trim(), date: addDate, time: draft.time, note: draft.note.trim() };
+    setSt(s => ({ ...s, bdCalendar: { ...s.bdCalendar, [rep]: [...(s.bdCalendar[rep] || []), evt] } }));
+    setDraft({ title: '', time: '', note: '' });
+    setShowAdd(false);
+    flash('Event added to calendar');
+  }
+
+  function removeEvent(id: string) {
+    setSt(s => ({ ...s, bdCalendar: { ...s.bdCalendar, [rep]: (s.bdCalendar[rep] || []).filter(e => e.id !== id) } }));
+  }
+
+  const firstDay = new Date(viewYear, viewMonth, 1).getDay();
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const monthName = new Date(viewYear, viewMonth, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
+  const cells: Array<number | null> = [...Array(firstDay).fill(null), ...Array.from({ length: daysInMonth }, (_, i) => i + 1)];
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const dateKey = (d: number) => `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const dayEvents = selectedDate ? events.filter(e => e.date === selectedDate).sort((a, b) => a.time.localeCompare(b.time)) : [];
+
+  return (
+    <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '20px 24px', overflow: 'auto' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <div style={{ font: '800 20px/1 var(--font-heading)' }}>{monthName}</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => { const d = new Date(viewYear, viewMonth - 1, 1); setViewMonth(d.getMonth()); setViewYear(d.getFullYear()); }} style={{ padding: '6px 14px', border: '1px solid var(--color-divider)', background: 'none', cursor: 'pointer', font: '600 13px/1' }}>‹</button>
+            <button onClick={() => { const d = new Date(viewYear, viewMonth + 1, 1); setViewMonth(d.getMonth()); setViewYear(d.getFullYear()); }} style={{ padding: '6px 14px', border: '1px solid var(--color-divider)', background: 'none', cursor: 'pointer', font: '600 13px/1' }}>›</button>
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', marginBottom: 4 }}>
+          {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
+            <div key={d} style={{ padding: '6px 4px', font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-500)', textAlign: 'center' }}>{d}</div>
+          ))}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 2, flex: 1 }}>
+          {cells.map((d, i) => {
+            if (d === null) return <div key={i} style={{ minHeight: 80, background: 'var(--color-neutral-100)', opacity: .4 }} />;
+            const key = dateKey(d);
+            const evts = events.filter(e => e.date === key);
+            const isToday = key === todayKey;
+            const isSelected = selectedDate === key;
+            return (
+              <div key={i} onClick={() => { setSelectedDate(key); setAddDate(key); }} style={{ minHeight: 80, padding: '6px 8px', border: isSelected ? '2px solid var(--color-accent)' : '1px solid var(--color-divider)', background: isSelected ? 'oklch(0.97 0.01 30)' : isToday ? 'var(--color-neutral-100)' : 'var(--color-bg)', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <div style={{ font: (isToday ? '800' : '500') + ' 12px/1 var(--font-body)', color: isToday ? 'var(--color-accent)' : 'var(--color-text)' }}>{d}</div>
+                {evts.slice(0, 3).map(e => (
+                  <div key={e.id} style={{ font: '600 9.5px/1.2 var(--font-body)', padding: '2px 5px', background: 'var(--color-text)', color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.time ? (e.time + ' ') : ''}{e.title}</div>
+                ))}
+                {evts.length > 3 && <div style={{ font: '500 9px/1 var(--font-body)', color: 'var(--color-neutral-500)' }}>+{evts.length - 3} more</div>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div style={{ width: 280, flexShrink: 0, borderLeft: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', background: 'var(--color-neutral-100)', overflow: 'hidden' }}>
+        <div style={{ padding: '14px 16px', borderBottom: '2px solid var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em' }}>{selectedDate ? new Date(selectedDate + 'T12:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) : 'SELECT A DAY'}</div>
+          <button onClick={() => { if (selectedDate) setAddDate(selectedDate); setShowAdd(s => !s); }} style={{ padding: '5px 10px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 10px/1 var(--font-body)', cursor: 'pointer' }}>+ ADD</button>
+        </div>
+        {showAdd && (
+          <div style={{ padding: 14, borderBottom: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <Field label="TITLE"><input value={draft.title} onChange={e => setDraft(d => ({ ...d, title: e.target.value }))} placeholder="Event or task title" style={{ ...inp, padding: '7px 9px' }} autoFocus onKeyDown={e => e.key === 'Enter' && addEvent()} /></Field>
+            <Field label="DATE"><input type="date" value={addDate} onChange={e => setAddDate(e.target.value)} style={{ ...inp, padding: '7px 9px' }} /></Field>
+            <Field label="TIME (OPTIONAL)"><input type="time" value={draft.time} onChange={e => setDraft(d => ({ ...d, time: e.target.value }))} style={{ ...inp, padding: '7px 9px' }} /></Field>
+            <Field label="NOTE"><textarea value={draft.note} onChange={e => setDraft(d => ({ ...d, note: e.target.value }))} placeholder="Optional details…" style={{ ...inp, minHeight: 52, resize: 'vertical', padding: '7px 9px' }} /></Field>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={addEvent} style={{ flex: 1, padding: '8px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 10px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer' }}>SAVE</button>
+              <button onClick={() => setShowAdd(false)} style={{ padding: '8px 12px', background: 'none', border: '1px solid var(--color-divider)', font: '600 10px/1 var(--font-body)', cursor: 'pointer' }}>✕</button>
+            </div>
+          </div>
+        )}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {dayEvents.length === 0 && <div style={{ padding: 16, ...T.meta }}>No events on this day.</div>}
+          {dayEvents.map(e => (
+            <div key={e.id} style={{ padding: '12px 14px', borderBottom: '1px solid var(--color-divider)', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ font: '600 12.5px/1.2 var(--font-body)', marginBottom: e.time ? 3 : 0 }}>{e.title}</div>
+                {e.time && <div style={{ font: '500 11px/1 var(--font-body)', color: 'var(--color-accent)', marginBottom: e.note ? 4 : 0 }}>{e.time}</div>}
+                {e.note && <div style={{ font: '400 11.5px/1.5 var(--font-body)', color: 'var(--color-neutral-600)' }}>{e.note}</div>}
+              </div>
+              <button onClick={() => removeEvent(e.id)} style={{ background: 'none', border: 'none', font: '400 14px/1', color: 'var(--color-neutral-400)', cursor: 'pointer', padding: '2px 4px', flexShrink: 0 }}>✕</button>
+            </div>
+          ))}
+        </div>
+        <div style={{ borderTop: '2px solid var(--color-text)', padding: '10px 14px 6px', font: '600 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-600)' }}>UPCOMING</div>
+        <div style={{ overflowY: 'auto', maxHeight: 200 }}>
+          {events.filter(e => e.date >= todayKey).sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time)).slice(0, 10).map(e => (
+            <div key={e.id} style={{ padding: '8px 14px', borderBottom: '1px solid var(--color-divider)', cursor: 'pointer' }} onClick={() => { setSelectedDate(e.date); setViewMonth(new Date(e.date + 'T12:00:00').getMonth()); setViewYear(new Date(e.date + 'T12:00:00').getFullYear()); }}>
+              <div style={{ font: '400 10px/1 var(--font-body)', color: 'var(--color-neutral-500)', marginBottom: 3 }}>{new Date(e.date + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' })}{e.time ? (' · ' + e.time) : ''}</div>
+              <div style={{ font: '600 12px/1 var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.title}</div>
+            </div>
+          ))}
+          {events.filter(e => e.date >= todayKey).length === 0 && <div style={{ padding: 14, ...T.meta }}>No upcoming events.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Company Contacts Tab ─────────────────────────────────────────────────────
+function CompanyContactsView({ st, setSt, me, flash }: {
+  st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>;
+  me: Person; flash: (m: string) => void;
+}) {
+  const [search, setSearch] = React.useState('');
+  const [showAdd, setShowAdd] = React.useState(false);
+
+  // Merge manually created companies with GCs scraped from bid board
+  const allCompanies: CrmCompany[] = React.useMemo(() => {
+    const manual = st.crmCompanies || [];
+    const manualNames = new Set(manual.map(c => c.name.toLowerCase()));
+    // Auto-create entries from bid board GCs not already in manual list
+    const auto: CrmCompany[] = [];
+    for (const bid of st.bidProjects) {
+      const gcs = bid.gcs?.filter(g => g.company) || (bid.gc ? [{ company: bid.gc, location: '', contactName: '', contactTitle: '', contactEmail: '', contactPhone: '' }] : []);
+      for (const gc of gcs) {
+        if (!gc.company || manualNames.has(gc.company.toLowerCase())) continue;
+        const existing = auto.find(c => c.name.toLowerCase() === gc.company.toLowerCase());
+        if (!existing) {
+          const off: CrmOffice[] = gc.location ? [{ id: 'o' + gc.company, label: gc.location, address: gc.location, phone: '', email: '' }] : [];
+          const con: CrmContact[] = gc.contactName ? [{ id: 'c' + gc.company, name: gc.contactName, title: gc.contactTitle || '', email: gc.contactEmail || '', phone: gc.contactPhone || '', officeId: off[0]?.id || '' }] : [];
+          auto.push({ id: 'auto_' + gc.company.replace(/\s+/g, '_'), name: gc.company, offices: off, contacts: con, notes: [], tier: bid.clientTier });
+        }
+      }
+    }
+    return [...manual, ...auto].sort((a, b) => a.name.localeCompare(b.name));
+  }, [st.crmCompanies, st.bidProjects]);
+
+  const filtered = search ? allCompanies.filter(c => c.name.toLowerCase().includes(search.toLowerCase())) : allCompanies;
+  const selected = allCompanies.find(c => c.id === st.crmSelectedCompany) || null;
+
+  // Ensure selected company exists in mutable state (upsert auto-gen)
+  function selectCompany(c: CrmCompany) {
+    const inManual = (st.crmCompanies || []).find(m => m.id === c.id);
+    if (!inManual) {
+      setSt(s => ({ ...s, crmCompanies: [...(s.crmCompanies || []), c], crmSelectedCompany: c.id, crmCompanyTab: 'info', crmSelectedBid: null }));
+    } else {
+      setSt(s => ({ ...s, crmSelectedCompany: c.id, crmCompanyTab: 'info', crmSelectedBid: null }));
+    }
+  }
+
+  function patchCompany(patch: Partial<CrmCompany>) {
+    setSt(s => ({ ...s, crmCompanies: (s.crmCompanies || []).map(c => c.id === st.crmSelectedCompany ? { ...c, ...patch } : c) }));
+  }
+
+  const tierLabel = (t?: string) => ({ '1': 'Tier 1', '2': 'Tier 2', '3': 'Tier 3', '4': 'Tier 4' }[t || ''] || '');
+  const tierBg = (t?: string) => ({ '1': '#1f7a4d', '2': 'oklch(0.50 0.18 240)', '3': '#b45309', '4': 'var(--color-neutral-500)' }[t || ''] || 'var(--color-neutral-400)');
+
+  return (
+    <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+      {/* ── Company List Rail ── */}
+      <div style={{ width: 280, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', background: 'var(--color-neutral-100)', overflow: 'hidden' }}>
+        <div style={{ padding: '14px 16px', borderBottom: '2px solid var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.16em' }}>COMPANY CONTACTS</div>
+          <button onClick={() => setShowAdd(true)} style={{ padding: '5px 10px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>+ ADD</button>
+        </div>
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--color-divider)' }}>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search companies…" style={{ ...inp, width: '100%', padding: '7px 10px' }} />
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {filtered.map(c => {
+            const bids = st.bidProjects.filter(b => b.gc === c.name || b.gcs?.some(g => g.company === c.name));
+            const open = bids.filter(b => !b.archived && b.status !== 'declined').length;
+            const active = st.crmSelectedCompany === c.id;
+            return (
+              <button key={c.id} onClick={() => selectCompany(c)} style={{ width: '100%', padding: '12px 14px', border: 'none', borderBottom: '1px solid var(--color-divider)', borderLeft: active ? '3px solid var(--color-accent)' : '3px solid transparent', background: active ? 'var(--color-bg)' : 'transparent', color: 'var(--color-text)', textAlign: 'left', cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'center' }}>
+                {c.logo
+                  ? <img src={c.logo} alt="" style={{ width: 36, height: 36, objectFit: 'cover', flexShrink: 0, borderRadius: 2 }} />
+                  : <div style={{ width: 36, height: 36, background: 'var(--color-text)', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 13px/1 var(--font-body)', color: '#fff', letterSpacing: '.02em' }}>
+                      {c.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
+                    </div>
+                }
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ font: '600 13px/1.2 var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {c.name}
+                    {c.tier && <span style={{ font: '700 8px/1 var(--font-body)', padding: '2px 5px', background: tierBg(c.tier), color: '#fff', letterSpacing: '.08em', flexShrink: 0 }}>{tierLabel(c.tier)}</span>}
+                  </div>
+                  <div style={{ font: '400 10.5px/1 var(--font-body)', color: 'var(--color-neutral-500)', marginTop: 3 }}>{c.offices.length} office{c.offices.length !== 1 ? 's' : ''} · {open} active bid{open !== 1 ? 's' : ''}</div>
+                </div>
+              </button>
+            );
+          })}
+          {filtered.length === 0 && <div style={{ padding: 20, ...T.meta }}>No companies found.</div>}
+        </div>
+      </div>
+
+      {/* ── Detail Panel ── */}
+      {!selected ? (
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ font: '400 32px/1', color: 'var(--color-neutral-300)', marginBottom: 12 }}>🏢</div>
+            <div style={{ font: '500 13px/1.5 var(--font-body)', color: 'var(--color-neutral-500)' }}>Select a company to view its profile</div>
+          </div>
+        </div>
+      ) : (
+        <CompanyDetailPanel key={selected.id} company={selected} st={st} setSt={setSt} me={me} flash={flash} patchCompany={patchCompany} />
+      )}
+
+      {showAdd && <AddCrmCompanyModal setSt={setSt} close={() => setShowAdd(false)} flash={flash} />}
+    </div>
+  );
+}
+
+function CompanyDetailPanel({ company, st, setSt, me, flash, patchCompany }: {
+  company: CrmCompany; st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>;
+  me: Person; flash: (m: string) => void;
+  patchCompany: (p: Partial<CrmCompany>) => void;
+}) {
+  const tab = st.crmCompanyTab;
+  const bids = st.bidProjects.filter(b => b.gc === company.name || b.gcs?.some(g => g.company === company.name));
+
+  const TABS: Array<{ id: typeof tab; label: string }> = [
+    { id: 'info', label: 'Company Info' },
+    { id: 'projects', label: `Projects (${bids.length})` },
+    { id: 'contacts', label: `Contacts (${company.contacts.length})` },
+    { id: 'notes', label: `Notes (${company.notes.length})` },
+    { id: 'analytics', label: 'Analytics' },
+  ];
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+      {/* header */}
+      <div style={{ padding: '18px 28px 0', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 14 }}>
+          <CompanyLogo company={company} size={52} patchCompany={patchCompany} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ font: '800 24px/1.1 var(--font-heading)' }}>{company.name}</div>
+            {company.website && <a href={company.website} target="_blank" rel="noreferrer" style={{ font: '400 11.5px/1 var(--font-body)', color: 'var(--color-accent)', textDecoration: 'none' }}>{company.website}</a>}
+          </div>
+          {company.tier && <span style={{ padding: '5px 12px', background: ({ '1': '#1f7a4d', '2': 'oklch(0.50 0.18 240)', '3': '#b45309', '4': 'var(--color-neutral-500)' }[company.tier] || '#666'), color: '#fff', font: '700 11px/1 var(--font-body)', letterSpacing: '.1em', flexShrink: 0 }}>TIER {company.tier}</span>}
+        </div>
+        {/* sub-tabs */}
+        <div style={{ display: 'flex', gap: 0 }}>
+          {TABS.map(t => (
+            <button key={t.id} onClick={() => setSt(s => ({ ...s, crmCompanyTab: t.id, crmSelectedBid: null }))} style={{ padding: '10px 18px', border: 'none', borderBottom: tab === t.id ? '3px solid var(--color-accent)' : '3px solid transparent', background: 'transparent', color: tab === t.id ? 'var(--color-accent)' : 'var(--color-neutral-600)', font: (tab === t.id ? '700' : '500') + ' 11.5px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', whiteSpace: 'nowrap' }}>{t.label}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* tab content */}
+      <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+        {tab === 'info' && <CompanyInfoTab company={company} patchCompany={patchCompany} flash={flash} />}
+        {tab === 'projects' && <CompanyProjectsTab company={company} bids={bids} st={st} setSt={setSt} me={me} />}
+        {tab === 'contacts' && <CompanyContactsTab company={company} patchCompany={patchCompany} flash={flash} />}
+        {tab === 'notes' && <CompanyNotesTab company={company} patchCompany={patchCompany} me={me} flash={flash} />}
+        {tab === 'analytics' && <CompanyAnalyticsTab company={company} bids={bids} />}
+      </div>
+    </div>
+  );
+}
+
+// Clickable logo / photo upload
+function CompanyLogo({ company, size, patchCompany }: { company: CrmCompany; size: number; patchCompany: (p: Partial<CrmCompany>) => void }) {
+  const ref = React.useRef<HTMLInputElement>(null);
+  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const reader = new FileReader();
+    reader.onload = ev => patchCompany({ logo: ev.target?.result as string });
+    reader.readAsDataURL(f);
+  };
+  return (
+    <div onClick={() => ref.current?.click()} title="Click to change logo" style={{ width: size, height: size, flexShrink: 0, cursor: 'pointer', position: 'relative', overflow: 'hidden', border: '1px solid var(--color-divider)' }}>
+      {company.logo
+        ? <img src={company.logo} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+        : <div style={{ width: '100%', height: '100%', background: 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 ' + Math.round(size * 0.35) + 'px/1 var(--font-heading)', color: 'var(--color-neutral-500)' }}>
+            {company.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
+          </div>
+      }
+      <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0, transition: 'opacity .15s' }} onMouseEnter={e => (e.currentTarget.style.opacity = '1')} onMouseLeave={e => (e.currentTarget.style.opacity = '0')}>
+        <span style={{ color: '#fff', font: '600 9px/1 var(--font-body)', letterSpacing: '.08em' }}>LOGO</span>
+      </div>
+      <input ref={ref} type="file" accept="image/*" onChange={handleFile} style={{ display: 'none' }} />
+    </div>
+  );
+}
+
+// ── Info Tab ──
+function CompanyInfoTab({ company, patchCompany, flash }: { company: CrmCompany; patchCompany: (p: Partial<CrmCompany>) => void; flash: (m: string) => void }) {
+  const [offices, setOffices] = React.useState<CrmOffice[]>(company.offices);
+  const [website, setWebsite] = React.useState(company.website || '');
+  const [tier, setTier] = React.useState(company.tier || '');
+  const [dirty, setDirty] = React.useState(false);
+
+  function save() {
+    patchCompany({ offices, website: website.trim(), tier: tier || undefined });
+    setDirty(false);
+    flash('Company info saved');
+  }
+  function mark<T>(setter: React.Dispatch<React.SetStateAction<T>>) {
+    return (val: T) => { setter(val); setDirty(true); };
+  }
+  function patchOff(i: number, patch: Partial<CrmOffice>) {
+    mark(setOffices)(offices.map((o, j) => j === i ? { ...o, ...patch } : o));
+  }
+  function addOffice() { mark(setOffices)([...offices, { id: 'off' + Date.now(), label: '', address: '', phone: '', email: '' }]); }
+  function removeOffice(i: number) { mark(setOffices)(offices.filter((_, j) => j !== i)); }
+
+  return (
+    <div style={{ padding: '24px 32px', display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 700 }}>
+      {/* general */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        <Field label="WEBSITE">
+          <input value={website} onChange={e => { setWebsite(e.target.value); setDirty(true); }} placeholder="https://company.com" style={{ ...inp, padding: '8px 10px' }} />
+        </Field>
+        <Field label="CLIENT TIER">
+          <select value={tier} onChange={e => { setTier(e.target.value); setDirty(true); }} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+            <option value="">— None —</option>
+            <option value="1">Tier 1</option>
+            <option value="2">Tier 2</option>
+            <option value="3">Tier 3</option>
+            <option value="4">Tier 4 (non-tiered)</option>
+          </select>
+        </Field>
+      </div>
+
+      {/* offices */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, paddingBottom: 8, borderBottom: '1px solid var(--color-divider)' }}>
+          <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em' }}>OFFICE LOCATIONS</div>
+          <button onClick={addOffice} style={{ padding: '5px 12px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>+ ADD OFFICE</button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {offices.map((off, i) => (
+            <div key={off.id} style={{ border: '1px solid var(--color-divider)', padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-accent)' }}>OFFICE {i + 1}</div>
+                <button onClick={() => removeOffice(i)} style={{ padding: '3px 8px', border: '1px solid var(--color-neutral-400)', background: 'none', font: '600 9px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>REMOVE</button>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div style={{ gridColumn: '1/-1' }}>
+                  <Field label="OFFICE LABEL / TERRITORY"><input value={off.label} onChange={e => patchOff(i, { label: e.target.value })} placeholder="e.g. Charlotte HQ, Atlanta Office" style={{ ...inp, padding: '7px 10px' }} /></Field>
+                </div>
+                <div style={{ gridColumn: '1/-1' }}>
+                  <Field label="ADDRESS"><input value={off.address} onChange={e => patchOff(i, { address: e.target.value })} placeholder="Street, City, ST ZIP" style={{ ...inp, padding: '7px 10px' }} /></Field>
+                </div>
+                <Field label="PHONE"><input value={off.phone} onChange={e => patchOff(i, { phone: e.target.value })} placeholder="(000) 000-0000" style={{ ...inp, padding: '7px 10px' }} /></Field>
+                <Field label="OFFICE EMAIL"><input value={off.email} onChange={e => patchOff(i, { email: e.target.value })} placeholder="info@company.com" style={{ ...inp, padding: '7px 10px' }} /></Field>
+              </div>
+            </div>
+          ))}
+          {offices.length === 0 && <div style={{ ...T.meta, padding: '12px 0' }}>No offices added yet — click "Add Office" above.</div>}
+        </div>
+      </div>
+
+      {dirty && <button onClick={save} style={{ padding: '10px 24px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 12px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', alignSelf: 'flex-start' }}>SAVE CHANGES</button>}
+    </div>
+  );
+}
+
+// ── Projects Tab ──
+function CompanyProjectsTab({ company, bids, st, setSt, me }: { company: CrmCompany; bids: BidProject[]; st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person }) {
+  const openBid = bids.find(b => b.id === st.crmSelectedBid);
+
+  if (openBid) {
+    const gcs = openBid.gcs?.filter(g => g.company) || (openBid.gc ? [{ company: openBid.gc, location: '', contactName: '', contactTitle: '', contactEmail: '', contactPhone: '' }] : []);
+    const statusColor2 = openBid.status === 'accepted' ? '#1f7a4d' : openBid.status === 'declined' ? 'var(--color-accent)' : openBid.status === 'review' ? 'oklch(0.50 0.18 240)' : 'var(--color-neutral-600)';
+    return (
+      <div style={{ padding: '24px 32px', maxWidth: 700 }}>
+        <button onClick={() => setSt(s => ({ ...s, crmSelectedBid: null }))} style={{ background: 'none', border: 'none', font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer', color: 'var(--color-accent)', padding: 0, marginBottom: 20 }}>← ALL PROJECTS</button>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 20 }}>
+          <div>
+            <div style={{ font: '800 22px/1.1 var(--font-heading)', marginBottom: 6 }}>{openBid.name}</div>
+            <div style={{ ...T.meta }}>{openBid.scope}</div>
+          </div>
+          <span style={{ padding: '5px 12px', background: statusColor2, color: '#fff', font: '700 10px/1 var(--font-body)', letterSpacing: '.1em', flexShrink: 0, textTransform: 'uppercase' }}>{openBid.status}</span>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 0, border: '1px solid var(--color-divider)', marginBottom: 20 }}>
+          {[['BID DATE', openBid.bidDate], ['DRAWING LEVEL', openBid.level], ['LOCATION', openBid.location], ['JOB SIZE', openBid.jobSize?.toUpperCase() || '—'], ['OFFICE', openBid.office || '—'], ['ENTRY DATE', openBid.entryDate || '—']].map(([l, v], i) => (
+            <div key={l} style={{ padding: '10px 14px', borderRight: (i + 1) % 3 !== 0 ? '1px solid var(--color-divider)' : 'none', borderBottom: i < 3 ? '1px solid var(--color-divider)' : 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={T.label}>{l}</div>
+              <div style={{ font: '600 13px/1 var(--font-body)' }}>{v}</div>
+            </div>
+          ))}
+        </div>
+        {openBid.planRoom && <div style={{ marginBottom: 16 }}><div style={T.label}>PLAN ROOM</div><a href={openBid.planRoom} target="_blank" rel="noreferrer" style={{ font: '600 12px/1 var(--font-body)', color: 'var(--color-accent)' }}>{openBid.planRoom}</a></div>}
+        {gcs.map((gc, i) => gc.contactName && (
+          <div key={i} style={{ padding: '12px 14px', border: '1px solid var(--color-divider)', marginBottom: 8 }}>
+            <div style={{ font: '600 13px/1.2 var(--font-body)', marginBottom: 4 }}>{gc.contactName}<span style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginLeft: 8 }}>{gc.contactTitle}</span></div>
+            <div style={{ ...T.micro }}>{[gc.contactEmail, gc.contactPhone].filter(Boolean).join(' · ')}</div>
+          </div>
+        ))}
+        {openBid.info && <div style={{ marginTop: 16 }}><div style={T.label}>PROJECT INFO</div><div style={{ font: '400 12.5px/1.6 var(--font-body)', color: 'var(--color-neutral-700)', marginTop: 6, whiteSpace: 'pre-wrap' }}>{openBid.info}</div></div>}
+        {openBid.notes && <div style={{ marginTop: 12 }}><div style={T.label}>INTERNAL NOTES</div><div style={{ font: '400 12.5px/1.6 var(--font-body)', color: 'var(--color-neutral-700)', marginTop: 6 }}>{openBid.notes}</div></div>}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: '24px 32px' }}>
+      <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 16 }}>ALL PROJECTS WITH {company.name.toUpperCase()} · {bids.length}</div>
+      {bids.length === 0 && <div style={T.meta}>No projects on record with this company.</div>}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 0, border: bids.length ? '1px solid var(--color-divider)' : 'none' }}>
+        {bids.map((bid, i) => {
+          const statusBg = bid.status === 'accepted' ? '#1f7a4d' : bid.status === 'declined' ? 'var(--color-accent)' : bid.status === 'review' ? 'oklch(0.50 0.18 240)' : 'var(--color-neutral-500)';
+          return (
+            <button key={bid.id} onClick={() => setSt(s => ({ ...s, crmSelectedBid: bid.id }))} style={{ width: '100%', padding: '14px 16px', border: 'none', borderBottom: i < bids.length - 1 ? '1px solid var(--color-divider)' : 'none', background: 'transparent', textAlign: 'left', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 14 }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-neutral-100)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ font: '600 13px/1.2 var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 4 }}>{bid.name}</div>
+                <div style={{ ...T.micro }}>{bid.scope || '—'} · Bid {bid.bidDate} · {bid.location || '—'}</div>
+              </div>
+              {bid.jobSize && <span style={{ font: '700 9px/1 var(--font-body)', padding: '2px 6px', background: bid.jobSize === 'large' ? 'var(--color-text)' : bid.jobSize === 'medium' ? 'oklch(0.50 0.18 240)' : 'var(--color-neutral-400)', color: '#fff', flexShrink: 0 }}>{bid.jobSize.toUpperCase()}</span>}
+              <span style={{ font: '700 9px/1 var(--font-body)', padding: '3px 8px', background: statusBg, color: '#fff', letterSpacing: '.08em', flexShrink: 0, textTransform: 'uppercase' }}>{bid.status}</span>
+              <span style={{ color: 'var(--color-neutral-400)', font: '400 14px/1' }}>›</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Contacts Tab ──
+function CompanyContactsTab({ company, patchCompany, flash }: { company: CrmCompany; patchCompany: (p: Partial<CrmCompany>) => void; flash: (m: string) => void }) {
+  const [contacts, setContacts] = React.useState<CrmContact[]>(company.contacts);
+  const [dirty, setDirty] = React.useState(false);
+  const [adding, setAdding] = React.useState(false);
+  const [draft, setDraft] = React.useState<Omit<CrmContact, 'id'>>({ name: '', title: '', email: '', phone: '', officeId: '' });
+
+  function save() {
+    patchCompany({ contacts });
+    setDirty(false);
+    flash('Contacts saved');
+  }
+  function addContact() {
+    if (!draft.name.trim()) return;
+    const updated = [...contacts, { ...draft, id: 'con' + Date.now() }];
+    setContacts(updated);
+    patchCompany({ contacts: updated });
+    setDraft({ name: '', title: '', email: '', phone: '', officeId: '' });
+    setAdding(false);
+    flash('Contact added');
+  }
+  function removeContact(id: string) {
+    const updated = contacts.filter(c => c.id !== id);
+    setContacts(updated);
+    patchCompany({ contacts: updated });
+  }
+
+  return (
+    <div style={{ padding: '24px 32px', maxWidth: 700 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em' }}>CONTACTS · {contacts.length}</div>
+        <button onClick={() => setAdding(a => !a)} style={{ padding: '6px 14px', background: adding ? 'transparent' : 'var(--color-accent)', color: adding ? 'var(--color-text)' : '#fff', border: adding ? '1px solid var(--color-divider)' : 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>{adding ? 'CANCEL' : '+ ADD CONTACT'}</button>
+      </div>
+
+      {adding && (
+        <div style={{ padding: 16, border: '1px solid var(--color-accent)', marginBottom: 20, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <Field label="FULL NAME"><input value={draft.name} onChange={e => setDraft(d => ({ ...d, name: e.target.value }))} placeholder="Full name" style={{ ...inp, padding: '7px 10px' }} autoFocus /></Field>
+          <Field label="JOB TITLE"><input value={draft.title} onChange={e => setDraft(d => ({ ...d, title: e.target.value }))} placeholder="e.g. Project Manager" style={{ ...inp, padding: '7px 10px' }} /></Field>
+          <Field label="EMAIL"><input value={draft.email} onChange={e => setDraft(d => ({ ...d, email: e.target.value }))} placeholder="name@company.com" type="email" style={{ ...inp, padding: '7px 10px' }} /></Field>
+          <Field label="PHONE"><input value={draft.phone} onChange={e => setDraft(d => ({ ...d, phone: e.target.value }))} placeholder="(000) 000-0000" style={{ ...inp, padding: '7px 10px' }} /></Field>
+          <div style={{ gridColumn: '1/-1' }}>
+            <Field label="OFFICE / LOCATION">
+              <select value={draft.officeId} onChange={e => setDraft(d => ({ ...d, officeId: e.target.value }))} style={{ ...inp, padding: '7px 10px', appearance: 'none' }}>
+                <option value="">— No specific office —</option>
+                {company.offices.map(o => <option key={o.id} value={o.id}>{o.label || o.address}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div style={{ gridColumn: '1/-1', display: 'flex', gap: 8 }}>
+            <button onClick={addContact} style={{ padding: '8px 18px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>ADD</button>
+            <button onClick={() => setAdding(false)} style={{ padding: '8px 14px', background: 'none', border: '1px solid var(--color-divider)', font: '600 11px/1 var(--font-body)', cursor: 'pointer' }}>CANCEL</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 0, border: contacts.length ? '1px solid var(--color-divider)' : 'none' }}>
+        {contacts.map((c, i) => {
+          const office = company.offices.find(o => o.id === c.officeId);
+          return (
+            <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 16px', borderBottom: i < contacts.length - 1 ? '1px solid var(--color-divider)' : 'none' }}>
+              <div style={{ width: 40, height: 40, background: 'var(--color-text)', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 12px/1 var(--font-body)', color: '#fff' }}>
+                {c.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ font: '600 14px/1.2 var(--font-body)' }}>{c.name}</div>
+                <div style={{ font: '400 11.5px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 3 }}>{c.title}{office ? ` · ${office.label || office.address}` : ''}</div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end', flexShrink: 0 }}>
+                {c.email && <a href={'mailto:' + c.email} style={{ font: '600 11.5px/1 var(--font-body)', color: 'var(--color-accent)', textDecoration: 'none' }}>{c.email}</a>}
+                {c.phone && <a href={'tel:' + c.phone} style={{ font: '400 12px/1 var(--font-body)', color: 'var(--color-text)', textDecoration: 'none' }}>{c.phone}</a>}
+              </div>
+              <button onClick={() => removeContact(c.id)} title="Remove" style={{ background: 'none', border: 'none', font: '400 16px/1', color: 'var(--color-neutral-400)', cursor: 'pointer', padding: '0 4px' }}>✕</button>
+            </div>
+          );
+        })}
+        {contacts.length === 0 && !adding && <div style={{ ...T.meta, padding: '12px 0' }}>No contacts yet. Click "Add Contact" to start.</div>}
+      </div>
+    </div>
+  );
+}
+
+// ── Notes Tab ──
+function CompanyNotesTab({ company, patchCompany, me, flash }: { company: CrmCompany; patchCompany: (p: Partial<CrmCompany>) => void; me: Person; flash: (m: string) => void }) {
+  const [draft, setDraft] = React.useState('');
+
+  function addNote() {
+    if (!draft.trim()) return;
+    const note: CrmCompanyNote = { id: 'cn' + Date.now(), text: draft.trim(), by: me.first, at: new Date().toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) };
+    patchCompany({ notes: [note, ...company.notes] });
+    setDraft('');
+    flash('Note saved');
+  }
+
+  return (
+    <div style={{ padding: '24px 32px', maxWidth: 680 }}>
+      <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 14 }}>COMPANY NOTES</div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 24 }}>
+        <textarea value={draft} onChange={e => setDraft(e.target.value)} placeholder="Add a note about this company…" style={{ ...inp, flex: 1, minHeight: 80, resize: 'vertical' }} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) addNote(); }} />
+        <button onClick={addNote} style={{ padding: '10px 16px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', alignSelf: 'flex-start', whiteSpace: 'nowrap' }}>SAVE NOTE</button>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+        {company.notes.length === 0 && <div style={T.meta}>No notes yet.</div>}
+        {company.notes.map((n, i) => (
+          <div key={n.id} style={{ padding: '14px 0', borderBottom: i < company.notes.length - 1 ? '1px solid var(--color-divider)' : 'none' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6 }}>
+              <span style={{ font: '600 11px/1 var(--font-body)', color: 'var(--color-accent-700)' }}>{n.by}</span>
+              <span style={T.micro}>{n.at}</span>
+              <button onClick={() => patchCompany({ notes: company.notes.filter(x => x.id !== n.id) })} style={{ marginLeft: 'auto', background: 'none', border: 'none', font: '400 13px/1', color: 'var(--color-neutral-400)', cursor: 'pointer', padding: 0 }}>✕</button>
+            </div>
+            <div style={{ font: '400 13px/1.6 var(--font-body)', color: 'var(--color-text)' }}>{n.text}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Analytics Tab ──
+function CompanyAnalyticsTab({ company, bids }: { company: CrmCompany; bids: BidProject[] }) {
+  const total = bids.length;
+  const won = bids.filter(b => b.status === 'accepted').length;
+  const lost = bids.filter(b => b.status === 'declined').length;
+  const pending = bids.filter(b => !b.archived && b.status !== 'accepted' && b.status !== 'declined').length;
+  const closingRatio = total > 0 ? Math.round((won / total) * 100) : 0;
+
+  // Bid size breakdown
+  const bySize = { large: bids.filter(b => b.jobSize === 'large'), medium: bids.filter(b => b.jobSize === 'medium'), small: bids.filter(b => b.jobSize === 'small'), unknown: bids.filter(b => !b.jobSize) };
+
+  // By office
+  const byOffice: Record<string, number> = {};
+  for (const b of bids) { const o = b.office || 'Unassigned'; byOffice[o] = (byOffice[o] || 0) + 1; }
+
+  // Win/loss by size
+  const sizeStats = (['large', 'medium', 'small'] as const).map(s => ({
+    label: s.charAt(0).toUpperCase() + s.slice(1),
+    total: bySize[s].length,
+    won: bySize[s].filter(b => b.status === 'accepted').length,
+    lost: bySize[s].filter(b => b.status === 'declined').length,
+  }));
+
+  const StatBox = ({ label, value, sub, color }: { label: string; value: string | number; sub?: string; color?: string }) => (
+    <div style={{ padding: '18px 20px', border: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={T.label}>{label}</div>
+      <div style={{ font: '800 32px/1 var(--font-heading)', color: color || 'var(--color-text)' }}>{value}</div>
+      {sub && <div style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-500)' }}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div style={{ padding: '24px 32px', maxWidth: 720 }}>
+      <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em', marginBottom: 20 }}>BID ANALYTICS — {company.name.toUpperCase()}</div>
+
+      {/* key metrics */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 28 }}>
+        <StatBox label="TOTAL BIDS" value={total} />
+        <StatBox label="JOBS WON" value={won} color="#1f7a4d" />
+        <StatBox label="JOBS LOST" value={lost} color="var(--color-accent)" />
+        <StatBox label="CLOSING RATIO" value={`${closingRatio}%`} color={closingRatio >= 40 ? '#1f7a4d' : closingRatio >= 20 ? '#b45309' : 'var(--color-accent)'} sub={`${pending} pending`} />
+      </div>
+
+      {/* closing ratio bar */}
+      <div style={{ marginBottom: 28 }}>
+        <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.12em', marginBottom: 10 }}>WIN / LOSS BREAKDOWN</div>
+        {total > 0 ? (
+          <div style={{ height: 28, display: 'flex', overflow: 'hidden', border: '1px solid var(--color-divider)' }}>
+            {won > 0 && <div style={{ width: ((won/total)*100) + '%', background: '#1f7a4d', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', font: '600 10px/1 var(--font-body)' }}>{won > 0 && total > 0 ? (Math.round((won/total)*100) + '% WON') : ''}</div>}
+            {pending > 0 && <div style={{ width: ((pending/total)*100) + '%', background: 'oklch(0.50 0.18 240)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', font: '600 10px/1 var(--font-body)' }}>{pending} PENDING</div>}
+            {lost > 0 && <div style={{ flex: 1, background: 'var(--color-neutral-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-text)', font: '600 10px/1 var(--font-body)' }}>{lost} LOST</div>}
+          </div>
+        ) : <div style={T.meta}>No bids to display.</div>}
+      </div>
+
+      {/* by job size */}
+      {sizeStats.some(s => s.total > 0) && (
+        <div style={{ marginBottom: 28 }}>
+          <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.12em', marginBottom: 10 }}>BY JOB SIZE</div>
+          <div style={{ border: '1px solid var(--color-divider)', overflow: 'hidden' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px 60px 80px', padding: '8px 14px', background: 'var(--color-neutral-100)', borderBottom: '1px solid var(--color-divider)' }}>
+              {['SIZE', 'TOTAL', 'WON', 'LOST', 'RATIO'].map(h => <div key={h} style={{ font: '500 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', textAlign: h !== 'SIZE' ? 'center' : 'left' }}>{h}</div>)}
+            </div>
+            {sizeStats.filter(s => s.total > 0).map(s => (
+              <div key={s.label} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 60px 60px 80px', padding: '10px 14px', borderBottom: '1px solid var(--color-divider)' }}>
+                <div style={{ font: '600 13px/1 var(--font-body)' }}>{s.label}</div>
+                <div style={{ font: '600 13px/1 var(--font-body)', textAlign: 'center' }}>{s.total}</div>
+                <div style={{ font: '600 13px/1 var(--font-body)', textAlign: 'center', color: '#1f7a4d' }}>{s.won}</div>
+                <div style={{ font: '600 13px/1 var(--font-body)', textAlign: 'center', color: 'var(--color-accent)' }}>{s.lost}</div>
+                <div style={{ font: '600 13px/1 var(--font-body)', textAlign: 'center', color: s.total > 0 && Math.round((s.won/s.total)*100) >= 40 ? '#1f7a4d' : 'var(--color-neutral-700)' }}>{s.total > 0 ? `${Math.round((s.won/s.total)*100)}%` : '—'}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* by office */}
+      {Object.keys(byOffice).length > 0 && (
+        <div>
+          <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.12em', marginBottom: 10 }}>BIDS BY OFFICE</div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {Object.entries(byOffice).map(([office, count]) => (
+              <div key={office} style={{ padding: '10px 16px', border: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 4, minWidth: 120 }}>
+                <div style={T.label}>{office.toUpperCase()}</div>
+                <div style={{ font: '700 20px/1 var(--font-heading)' }}>{count}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Add Company Modal ──
+function AddCrmCompanyModal({ setSt, close, flash }: { setSt: React.Dispatch<React.SetStateAction<AppState>>; close: () => void; flash: (m: string) => void }) {
+  const [name, setName] = React.useState('');
+  const [website, setWebsite] = React.useState('');
+  const [tier, setTier] = React.useState('');
+
+  function save() {
+    if (!name.trim()) return;
+    const id = 'crm_' + Date.now();
+    const company: CrmCompany = { id, name: name.trim(), website: website.trim() || undefined, tier: tier || undefined, offices: [], contacts: [], notes: [] };
+    setSt(s => ({ ...s, crmCompanies: [...(s.crmCompanies || []), company], crmSelectedCompany: id, crmCompanyTab: 'info', crmSelectedBid: null }));
+    flash('Company added');
+    close();
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.5)', display: 'grid', placeItems: 'center', zIndex: 300 }}>
+      <div style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 440, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '2px solid var(--color-text)', font: '800 14px/1 var(--font-heading)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          ADD COMPANY
+          <button onClick={close} style={{ background: 'none', border: 'none', font: '400 18px/1', cursor: 'pointer', color: 'var(--color-neutral-500)' }}>✕</button>
+        </div>
+        <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <Field label="COMPANY NAME *"><input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Turner Construction" style={{ ...inp, padding: '8px 10px' }} autoFocus onKeyDown={e => e.key === 'Enter' && save()} /></Field>
+          <Field label="WEBSITE"><input value={website} onChange={e => setWebsite(e.target.value)} placeholder="https://company.com" style={{ ...inp, padding: '8px 10px' }} /></Field>
+          <Field label="CLIENT TIER">
+            <select value={tier} onChange={e => setTier(e.target.value)} style={{ ...inp, padding: '8px 10px', appearance: 'none' }}>
+              <option value="">— None —</option>
+              <option value="1">Tier 1</option>
+              <option value="2">Tier 2</option>
+              <option value="3">Tier 3</option>
+              <option value="4">Tier 4 (non-tiered)</option>
+            </select>
+          </Field>
+        </div>
+        <div style={{ padding: '14px 20px', borderTop: '1px solid var(--color-divider)', display: 'flex', gap: 10 }}>
+          <Button onClick={save}>CREATE COMPANY</Button>
+          <Button variant="secondary" onClick={close}>CANCEL</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Standalone Vendor Contacts tab (top-level)
+function VendorContactsView({ st, setSt }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person }) {
+  const search = st.resSearch.toLowerCase();
+  // User overrides win over built-ins when ids match
+  const userOverrideIds = new Set((st.userVendors || []).filter(v => VENDORS.some(b => b.id === v.id)).map(v => v.id));
+  const allVendors = [...VENDORS.filter(v => !userOverrideIds.has(v.id)), ...(st.userVendors || [])].sort((a, b) => a.name.localeCompare(b.name));
+  const filtered = allVendors.filter(v => {
+    if (st.resVendorTrade !== 'All trades' && v.trade !== st.resVendorTrade) return false;
+    if (!search) return true;
+    return v.name.toLowerCase().includes(search) || v.trade.toLowerCase().includes(search) ||
+      v.locations.some(l => l.territory.toLowerCase().includes(search) || l.contacts.some(c => c.name.toLowerCase().includes(search) || c.email.toLowerCase().includes(search)));
+  });
+  const selected = allVendors.find(v => v.id === st.resSelectedVendor) || null;
+
+  return (
+    <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
+      {/* list rail */}
+      <div style={{ width: 270, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', background: 'var(--color-bg)', overflow: 'hidden' }}>
+        <div style={{ padding: '12px 16px', borderBottom: '2px solid var(--color-text)', font: '700 11px/1 var(--font-body)', letterSpacing: '.16em' }}>VENDOR CONTACTS</div>
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 7 }}>
+          <input value={st.resSearch} onChange={e => setSt(s => ({ ...s, resSearch: e.target.value, resSelectedVendor: null }))} placeholder="Search vendors, territory, contacts" style={{ ...inputStyle, width: '100%', padding: '7px 10px' }} />
+          <select value={st.resVendorTrade} onChange={e => setSt(s => ({ ...s, resVendorTrade: e.target.value, resSelectedVendor: null }))} style={{ ...inputStyle, width: '100%', padding: '7px 10px', appearance: 'none' }}>
+            {[...VENDOR_TRADES, ...(st.customVendorTrades || [])].map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {filtered.map(v => {
+            const active = st.resSelectedVendor === v.id;
+            const totalContacts = v.locations.reduce((a, l) => a + l.contacts.length, 0);
+            return (
+              <button key={v.id} onClick={() => setSt(s => ({ ...s, resSelectedVendor: v.id }))} style={{ width: '100%', padding: '12px 14px', border: 'none', borderBottom: '1px solid var(--color-divider)', borderLeft: active ? '3px solid var(--color-accent)' : '3px solid transparent', background: active ? 'var(--color-neutral-200)' : 'transparent', color: 'var(--color-text)', textAlign: 'left', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ font: '600 13px/1.2 var(--font-body)' }}>{v.name}</div>
+                <div style={{ font: '400 10.5px/1 var(--font-body)', opacity: .65 }}>{v.trade}</div>
+                <div style={{ font: '400 10px/1 var(--font-body)', color: 'var(--color-neutral-500)' }}>{v.locations.length} location{v.locations.length !== 1 ? 's' : ''} · {totalContacts} contact{totalContacts !== 1 ? 's' : ''}</div>
+              </button>
+            );
+          })}
+          {filtered.length === 0 && <div style={{ padding: '20px 14px', ...T.meta }}>No vendors match.</div>}
+        </div>
+        <div style={{ padding: '12px 14px', borderTop: '1px solid var(--color-divider)' }}>
+          <button onClick={() => setSt(s => ({ ...s, resShowAddVendor: true }))} style={{ width: '100%', padding: '9px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer' }}>+ ADD VENDOR</button>
+        </div>
+      </div>
+
+      {/* detail panel */}
+      <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        {!selected ? (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ font: '500 13px/1.5 var(--font-body)', color: 'var(--color-neutral-500)' }}>Select a vendor to view details</div>
+          </div>
+        ) : (
+          <>
+            {/* vendor header */}
+            <div style={{ padding: '24px 32px', borderBottom: '2px solid var(--color-text)', flexShrink: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 4 }}>
+                <div style={{ font: '800 26px/1.1 var(--font-heading)' }}>{selected.name}</div>
+                <button onClick={() => setSt(s => ({ ...s, resEditVendorId: selected.id }))} style={{ padding: '7px 16px', border: '1px solid var(--color-text)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', cursor: 'pointer', flexShrink: 0 }}>EDIT VENDOR</button>
+              </div>
+              <div style={{ font: '600 11px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-accent)', marginBottom: 12 }}>{selected.trade.toUpperCase()}</div>
+              {selected.about && <div style={{ font: '400 13px/1.65 var(--font-body)', color: 'var(--color-neutral-700)', maxWidth: 640, marginBottom: 16 }}>{selected.about}</div>}
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: selected.materials?.length ? 16 : 0 }}>
+                {[['Lead Time', selected.leadTime], ['Quote Turnaround', selected.quoteTurnaround]].map(([l, val]) => (
+                  <div key={l} style={{ padding: '9px 16px', border: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 4, minWidth: 130 }}>
+                    <div style={T.label}>{l}</div>
+                    <div style={{ font: '600 13px/1 var(--font-body)' }}>{val}</div>
+                  </div>
+                ))}
+              </div>
+              {selected.materials?.length > 0 && (
+                <div>
+                  <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', marginBottom: 8 }}>MATERIALS SUPPLIED</div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {selected.materials.map(m => (
+                      <span key={m} style={{ padding: '4px 10px', border: '1px solid var(--color-text)', font: '500 11.5px/1 var(--font-body)' }}>{m}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* locations + contacts */}
+            <div style={{ padding: '24px 32px', display: 'flex', flexDirection: 'column', gap: 28 }}>
+              <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.16em' }}>LOCATIONS & CONTACTS BY TERRITORY</div>
+              {selected.locations.map((loc, li) => (
+                <div key={loc.id} style={{ border: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column' }}>
+                  {/* location header */}
+                  <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--color-divider)', background: 'var(--color-neutral-100)', display: 'flex', alignItems: 'flex-start', gap: 20, flexWrap: 'wrap' }}>
+                    <div style={{ flex: 1, minWidth: 180 }}>
+                      <div style={{ font: '700 14px/1.2 var(--font-heading)', marginBottom: 4 }}>{loc.territory}</div>
+                      {loc.address && <div style={{ font: '400 12px/1.5 var(--font-body)', color: 'var(--color-neutral-600)' }}>{loc.address}</div>}
+                    </div>
+                    {loc.phone && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, alignItems: 'flex-end' }}>
+                        <div style={T.label}>OFFICE</div>
+                        <a href={'tel:' + loc.phone} style={{ font: '600 13px/1 var(--font-body)', color: 'var(--color-text)', textDecoration: 'none' }}>{loc.phone}</a>
+                      </div>
+                    )}
+                  </div>
+                  {/* contacts for this location */}
+                  {loc.contacts.length === 0 ? (
+                    <div style={{ padding: '14px 20px', ...T.meta }}>No contacts listed for this territory.</div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                      {loc.contacts.map((c, ci) => (
+                        <div key={ci} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 20px', borderBottom: ci < loc.contacts.length - 1 ? '1px solid var(--color-divider)' : 'none' }}>
+                          <div style={{ width: 38, height: 38, background: 'var(--color-text)', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 12px/1 var(--font-body)', color: '#fff', letterSpacing: '.04em' }}>
+                            {c.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ font: '600 14px/1.2 var(--font-body)' }}>{c.name}</div>
+                            <div style={{ font: '400 11.5px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 3 }}>{c.role}</div>
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 5, alignItems: 'flex-end', flexShrink: 0 }}>
+                            {c.phone && <a href={'tel:' + c.phone} style={{ font: '400 12px/1 var(--font-body)', color: 'var(--color-text)', textDecoration: 'none' }}>{c.phone}</a>}
+                            {c.email && <a href={'mailto:' + c.email} style={{ font: '600 11.5px/1 var(--font-body)', color: 'var(--color-accent)', textDecoration: 'none' }}>{c.email}</a>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {selected.locations.length === 0 && <div style={T.meta}>No locations on file.</div>}
+            </div>
+          </>
+        )}
+      </div>
+
+      {st.resShowAddVendor && <AddVendorForm setSt={setSt} close={() => setSt(s => ({ ...s, resShowAddVendor: false }))} />}
+      {st.resEditVendorId && (() => {
+        const allV = [...VENDORS, ...(st.userVendors || [])];
+        const v = allV.find(x => x.id === st.resEditVendorId);
+        return v ? <EditVendorForm vendor={v} setSt={setSt} close={() => setSt(s => ({ ...s, resEditVendorId: null }))} /> : null;
+      })()}
+    </div>
+  );
+}
+
+// Resources tab (processes, tools, training — no vendors)
+function ResourcesViewMain({ st, setSt }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person }) {
+  const cat = st.resCategory === 'vendors' ? 'processes' : st.resCategory;
   const search = st.resSearch.toLowerCase();
 
   const CATEGORIES: Array<{ key: typeof cat; label: string; count: number }> = [
     { key: 'processes', label: 'Processes', count: PROCESSES.length },
-    { key: 'vendors', label: 'Vendor contacts', count: VENDORS.length },
     { key: 'tools', label: 'Tools', count: TOOLS.length },
     { key: 'training', label: 'Training', count: TRAINING_VIDEOS.length },
   ];
 
-  const catHints: Record<typeof cat, string> = {
+  const catHints: Record<string, string> = {
     processes: 'Standard operating procedures for the estimating team.',
-    vendors: 'Approved suppliers and vendor contacts by trade.',
     tools: 'Software and workbooks used for estimating and takeoff.',
     training: 'Video guides for tools and estimating fundamentals.',
   };
@@ -3422,7 +5618,7 @@ function ResourcesView({ st, setSt }: { st: AppState; setSt: React.Dispatch<Reac
               <div style={{ font: '800 18px/1 var(--font-heading)' }}>{CATEGORIES.find(c => c.key === cat)?.label}</div>
               <div style={{ font: '400 11.5px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 4 }}>{catHints[cat]}</div>
             </div>
-            <input value={st.resSearch} onChange={e => setSt(s => ({ ...s, resSearch: e.target.value, resSelectedVendor: null }))} placeholder={cat === 'processes' ? 'Search processes' : cat === 'vendors' ? 'Search vendors' : cat === 'tools' ? 'Search tools' : 'Search training'} style={{ ...inputStyle, width: 220, padding: '8px 12px' }} />
+            <input value={st.resSearch} onChange={e => setSt(s => ({ ...s, resSearch: e.target.value, resSelectedVendor: null }))} placeholder={cat === 'processes' ? 'Search processes' : cat === 'tools' ? 'Search tools' : 'Search training'} style={{ ...inputStyle, width: 220, padding: '8px 12px' }} />
             <button onClick={() => setSt(s => ({ ...s, resAddingResource: true }))} style={{ padding: '9px 16px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', flexShrink: 0 }}>+ ADD RESOURCE</button>
           </div>
         )}
@@ -3461,65 +5657,6 @@ function ResourcesView({ st, setSt }: { st: AppState; setSt: React.Dispatch<Reac
         })()}
 
         {/* VENDORS */}
-        {cat === 'vendors' && (
-          <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden' }}>
-            <div style={{ width: 300, flexShrink: 0, borderRight: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--color-divider)', flexShrink: 0 }}>
-                <select value={st.resVendorTrade} onChange={e => setSt(s => ({ ...s, resVendorTrade: e.target.value, resSelectedVendor: null }))} style={{ ...inputStyle, width: '100%', padding: '7px 10px', appearance: 'none' }}>
-                  {[...VENDOR_TRADES, ...(st.customVendorTrades || [])].map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              <div style={{ flex: 1, overflowY: 'auto' }}>
-                {[...VENDORS, ...(st.userVendors || [])].filter(v => {
-                  if (st.resVendorTrade !== 'All trades' && v.trade !== st.resVendorTrade) return false;
-                  if (search && !v.name.toLowerCase().includes(search) && !v.trade.toLowerCase().includes(search) && !v.about.toLowerCase().includes(search) && !v.contacts.some(c => c.name.toLowerCase().includes(search) || c.email.toLowerCase().includes(search))) return false;
-                  return true;
-                }).map(v => (
-                  <button key={v.id} onClick={() => setSt(s => ({ ...s, resSelectedVendor: v.id }))} style={{ width: '100%', padding: '12px 14px', border: 'none', borderBottom: '1px solid var(--color-divider)', background: st.resSelectedVendor === v.id ? 'var(--color-text)' : 'transparent', color: st.resSelectedVendor === v.id ? '#fff' : 'var(--color-text)', textAlign: 'left', cursor: 'pointer' }}>
-                    <div style={{ font: '600 12.5px/1 var(--font-body)' }}>{v.name}</div>
-                    <div style={{ font: '400 10.5px/1 var(--font-body)', opacity: .65, marginTop: 4 }}>{v.trade} · {v.contacts.length} contact{v.contacts.length !== 1 ? 's' : ''}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div style={{ flex: 1, overflowY: 'auto', padding: '24px' }}>
-              {(() => {
-                const v = [...VENDORS, ...(st.userVendors || [])].find(v => v.id === st.resSelectedVendor);
-                if (!v) return <div style={{ font: '500 12px/1 var(--font-body)', color: 'var(--color-neutral-500)', padding: 8 }}>Select a company on the left.</div>;
-                return (
-                  <>
-                    <div style={{ font: '800 22px/1.2 var(--font-heading)', marginBottom: 4 }}>{v.name}</div>
-                    <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-accent)', textTransform: 'uppercase', marginBottom: 14 }}>{v.trade}</div>
-                    <div style={{ font: '400 13px/1.6 var(--font-body)', color: 'var(--color-neutral-700)', marginBottom: 16 }}>{v.about}</div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderTop: '1px solid var(--color-divider)', borderBottom: '1px solid var(--color-divider)', marginBottom: 20 }}>
-                      {[['LEAD TIME', v.leadTime], ['QUOTE TURNAROUND', v.quoteTurnaround]].map(([l, val]) => (
-                        <div key={l} style={{ padding: '12px 14px', borderLeft: l !== 'LEAD TIME' ? '1px solid var(--color-divider)' : 'none' }}>
-                          <div style={{ font: '500 9.5px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)', marginBottom: 6 }}>{l}</div>
-                          <div style={{ font: '700 13px/1 var(--font-body)' }}>{val}</div>
-                        </div>
-                      ))}
-                    </div>
-                    <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.12em', marginBottom: 10 }}>CONTACTS</div>
-                    {v.contacts.map((c, i) => (
-                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid var(--color-divider)' }}>
-                        <div style={{ width: 34, height: 34, background: 'var(--color-text)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 11px/1 var(--font-body)', color: '#fff', flexShrink: 0 }}>{c.name.split(' ').map(w => w[0]).join('')}</div>
-                        <div style={{ flex: 1 }}>
-                          <div style={{ font: '600 13px/1 var(--font-body)' }}>{c.name}</div>
-                          <div style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-600)', marginTop: 3 }}>{c.role}</div>
-                        </div>
-                        <div style={{ textAlign: 'right' }}>
-                          <div style={{ font: '400 11.5px/1 var(--font-body)' }}>{c.phone}</div>
-                          <a href={'mailto:' + c.email} style={{ font: '600 11px/1 var(--font-body)', color: 'var(--color-accent)', display: 'block', marginTop: 3 }}>{c.email}</a>
-                        </div>
-                      </div>
-                    ))}
-                  </>
-                );
-              })()}
-            </div>
-          </div>
-        )}
-
         {/* TOOLS */}
         {cat === 'tools' && (
           <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -3678,9 +5815,8 @@ function AddResourceModal({ st, setSt }: { st: AppState; setSt: React.Dispatch<R
   const cat = st.resCategory;
   const close = () => setSt(s => ({ ...s, resAddingResource: false }));
 
-  const TITLES: Record<typeof cat, string> = {
+  const TITLES: Record<string, string> = {
     processes: 'ADD PROCESS DOCUMENT',
-    vendors: 'ADD VENDOR CONTACT',
     tools: 'ADD TOOL',
     training: 'ADD TRAINING VIDEO',
   };
@@ -3691,7 +5827,6 @@ function AddResourceModal({ st, setSt }: { st: AppState; setSt: React.Dispatch<R
         <div style={{ padding: '16px 20px', borderBottom: '2px solid var(--color-text)', font: '800 15px/1 var(--font-heading)' }}>{TITLES[cat]}</div>
         <div style={{ flex: 1, overflow: 'auto' }}>
           {cat === 'processes' && <AddProcessForm setSt={setSt} close={close} />}
-          {cat === 'vendors' && <AddVendorForm setSt={setSt} close={close} />}
           {cat === 'tools' && <AddToolForm setSt={setSt} close={close} />}
           {cat === 'training' && <AddTrainingForm st={st} setSt={setSt} close={close} />}
         </div>
@@ -3748,77 +5883,288 @@ function AddProcessForm({ setSt, close }: { setSt: React.Dispatch<React.SetState
   );
 }
 
+type DraftLocation = { id: string; territory: string; address: string; phone: string; contacts: Array<{ name: string; role: string; phone: string; email: string }> };
+function emptyLocation(): DraftLocation {
+  return { id: 'dl' + Date.now() + Math.random(), territory: '', address: '', phone: '', contacts: [{ name: '', role: '', phone: '', email: '' }] };
+}
+
+function MaterialsInput({ materials, setMaterials }: { materials: string[]; setMaterials: (m: string[]) => void }) {
+  const [input, setInput] = React.useState('');
+  function add() {
+    const val = input.trim(); if (!val) return;
+    if (!materials.includes(val)) setMaterials([...materials, val]);
+    setInput('');
+  }
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: materials.length ? 8 : 0 }}>
+        {materials.map(m => (
+          <span key={m} style={{ padding: '4px 10px', border: '1px solid var(--color-text)', font: '500 11.5px/1 var(--font-body)', display: 'flex', alignItems: 'center', gap: 6 }}>
+            {m}
+            <button onClick={() => setMaterials(materials.filter(x => x !== m))} style={{ background: 'none', border: 'none', cursor: 'pointer', font: '400 12px/1', color: 'var(--color-neutral-500)', padding: 0 }}>✕</button>
+          </span>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input value={input} onChange={e => setInput(e.target.value)} placeholder="e.g. Tempered glass" style={{ ...inputStyle, flex: 1, padding: '8px 10px' }} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(); } }} />
+        <button onClick={add} style={{ padding: '8px 14px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer' }}>ADD</button>
+      </div>
+    </div>
+  );
+}
+
 function AddVendorForm({ setSt, close }: { setSt: React.Dispatch<React.SetStateAction<AppState>>; close: () => void }) {
   const [name, setName] = useState('');
   const [trade, setTrade] = useState(VENDOR_TRADES[1]);
   const [newTradeMode, setNewTradeMode] = useState(false);
   const [newTrade, setNewTrade] = useState('');
   const [about, setAbout] = useState('');
-  const [products, setProducts] = useState('');
   const [leadTime, setLeadTime] = useState('');
   const [quoteTurnaround, setQuoteTurnaround] = useState('');
-  const [contacts, setContacts] = useState([{ name: '', role: '', phone: '', email: '' }]);
+  const [materials, setMaterials] = useState<string[]>([]);
+  const [locations, setLocations] = useState<DraftLocation[]>([emptyLocation()]);
+
+  function patchLoc(i: number, patch: Partial<DraftLocation>) {
+    setLocations(ls => ls.map((l, j) => j === i ? { ...l, ...patch } : l));
+  }
+  function patchContact(li: number, ci: number, patch: Partial<DraftLocation['contacts'][0]>) {
+    setLocations(ls => ls.map((l, j) => j === li ? { ...l, contacts: l.contacts.map((c, k) => k === ci ? { ...c, ...patch } : c) } : l));
+  }
 
   function save() {
     if (!name.trim()) return;
     const resolvedTrade = newTradeMode ? newTrade.trim() : trade;
     if (!resolvedTrade) return;
     const id = 'uv' + Date.now();
+    const cleanLocs: VendorLocation[] = locations.filter(l => l.territory.trim()).map(l => ({
+      id: l.id, territory: l.territory.trim(), address: l.address.trim(), phone: l.phone.trim(),
+      contacts: l.contacts.filter(c => c.name.trim()),
+    }));
     setSt(s => ({
       ...s,
       userVendors: [...(s.userVendors || []), {
-        id, name: name.trim(), trade: resolvedTrade,
-        about: [about.trim(), products.trim() ? `Products/supply: ${products.trim()}` : ''].filter(Boolean).join(' · '),
-        leadTime: leadTime.trim() || '—', quoteTurnaround: quoteTurnaround.trim() || '—', terms: '—',
-        contacts: contacts.filter(c => c.name.trim()),
+        id, name: name.trim(), trade: resolvedTrade, about: about.trim(),
+        leadTime: leadTime.trim() || '—', quoteTurnaround: quoteTurnaround.trim() || '—', materials,
+        locations: cleanLocs,
       }],
       customVendorTrades: newTradeMode && newTrade.trim() && !VENDOR_TRADES.includes(newTrade.trim()) && !(s.customVendorTrades || []).includes(newTrade.trim())
-        ? [...(s.customVendorTrades || []), newTrade.trim()]
-        : (s.customVendorTrades || []),
+        ? [...(s.customVendorTrades || []), newTrade.trim()] : (s.customVendorTrades || []),
       resVendorTrade: resolvedTrade,
       resSelectedVendor: id,
-      resAddingResource: false,
+      resShowAddVendor: false,
     }));
   }
 
   return (
-    <div style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <Field label="COMPANY NAME"><input value={name} onChange={e => setName(e.target.value)} placeholder="Vendor or supplier name" style={{ ...inputStyle, padding: '8px 10px' }} autoFocus /></Field>
-      <Field label="TRADE">
-        {newTradeMode ? (
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input value={newTrade} onChange={e => setNewTrade(e.target.value)} placeholder="New trade name" style={{ ...inputStyle, padding: '8px 10px', flex: 1 }} autoFocus />
-            <button onClick={() => setNewTradeMode(false)} style={{ padding: '8px 12px', border: '1px solid var(--color-divider)', background: 'none', font: '600 10px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>← BACK</button>
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.5)', display: 'grid', placeItems: 'center', zIndex: 200 }}>
+      <div style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 720, maxWidth: '98vw', maxHeight: '94vh', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '16px 24px', borderBottom: '2px solid var(--color-text)', font: '800 15px/1 var(--font-heading)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          ADD VENDOR
+          <button onClick={close} style={{ background: 'none', border: 'none', font: '400 18px/1', cursor: 'pointer', color: 'var(--color-neutral-500)' }}>✕</button>
+        </div>
+        <div style={{ flex: 1, overflow: 'auto', padding: 24, display: 'flex', flexDirection: 'column', gap: 18 }}>
+          {/* Company basics */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            <div style={{ gridColumn: '1/-1' }}>
+              <Field label="COMPANY NAME"><input value={name} onChange={e => setName(e.target.value)} placeholder="Vendor or supplier name" style={{ ...inputStyle, padding: '8px 10px' }} autoFocus /></Field>
+            </div>
+            <Field label="TRADE">
+              {newTradeMode ? (
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input value={newTrade} onChange={e => setNewTrade(e.target.value)} placeholder="New trade name" style={{ ...inputStyle, padding: '8px 10px', flex: 1 }} />
+                  <button onClick={() => setNewTradeMode(false)} style={{ padding: '8px 10px', border: '1px solid var(--color-divider)', background: 'none', font: '600 10px/1 var(--font-body)', cursor: 'pointer' }}>← BACK</button>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <select value={trade} onChange={e => setTrade(e.target.value)} style={{ ...inputStyle, padding: '8px 10px', flex: 1, appearance: 'none' }}>
+                    {VENDOR_TRADES.slice(1).map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                  <button onClick={() => setNewTradeMode(true)} style={{ padding: '8px 10px', border: '1px solid var(--color-text)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', flexShrink: 0 }}>+ NEW</button>
+                </div>
+              )}
+            </Field>
+            <Field label="LEAD TIME"><input value={leadTime} onChange={e => setLeadTime(e.target.value)} placeholder="e.g. 6–8 wks" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+            <Field label="QUOTE TURNAROUND"><input value={quoteTurnaround} onChange={e => setQuoteTurnaround(e.target.value)} placeholder="e.g. 2–3 days" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+            <div style={{ gridColumn: '1/-1' }}>
+              <Field label="MATERIALS SUPPLIED (press Enter or click ADD after each)">
+                <MaterialsInput materials={materials} setMaterials={setMaterials} />
+              </Field>
+            </div>
+            <div style={{ gridColumn: '1/-1' }}>
+              <Field label="ABOUT / DESCRIPTION"><textarea value={about} onChange={e => setAbout(e.target.value)} placeholder="Products, strengths, notes" rows={2} style={{ ...inputStyle, padding: '8px 10px', resize: 'vertical' }} /></Field>
+            </div>
           </div>
-        ) : (
-          <div style={{ display: 'flex', gap: 8 }}>
-            <select value={trade} onChange={e => setTrade(e.target.value)} style={{ ...inputStyle, padding: '8px 10px', flex: 1, appearance: 'none' }}>
-              {VENDOR_TRADES.slice(1).map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-            <button onClick={() => setNewTradeMode(true)} style={{ padding: '8px 12px', border: '1px solid var(--color-text)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', flexShrink: 0 }}>+ NEW</button>
+
+          {/* Locations */}
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--color-divider)' }}>
+              <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em' }}>LOCATIONS & CONTACTS BY TERRITORY</div>
+              <button onClick={() => setLocations(ls => [...ls, emptyLocation()])} style={{ padding: '5px 12px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>+ ADD LOCATION</button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {locations.map((loc, li) => (
+                <div key={loc.id} style={{ border: '1px solid var(--color-divider)' }}>
+                  {/* location header row */}
+                  <div style={{ padding: '12px 16px', background: 'var(--color-neutral-100)', borderBottom: '1px solid var(--color-divider)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-accent)' }}>LOCATION {li + 1}</div>
+                    {locations.length > 1 && <button onClick={() => setLocations(ls => ls.filter((_, j) => j !== li))} style={{ padding: '3px 8px', border: '1px solid var(--color-neutral-400)', background: 'none', font: '600 9px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>REMOVE</button>}
+                  </div>
+                  <div style={{ padding: '14px 16px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, borderBottom: '1px solid var(--color-divider)' }}>
+                    <div style={{ gridColumn: '1/-1' }}>
+                      <Field label="TERRITORY / REGION NAME"><input value={loc.territory} onChange={e => patchLoc(li, { territory: e.target.value })} placeholder="e.g. Charlotte / Carolinas" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                    </div>
+                    <div style={{ gridColumn: '1/-1' }}>
+                      <Field label="ADDRESS"><input value={loc.address} onChange={e => patchLoc(li, { address: e.target.value })} placeholder="Street, City, ST ZIP" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                    </div>
+                    <Field label="OFFICE PHONE"><input value={loc.phone} onChange={e => patchLoc(li, { phone: e.target.value })} placeholder="(000) 000-0000" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                  </div>
+                  {/* contacts for this location */}
+                  <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)' }}>CONTACTS</div>
+                    {loc.contacts.map((c, ci) => (
+                      <div key={ci} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px', background: 'var(--color-neutral-100)', position: 'relative' }}>
+                        <Field label="NAME"><input value={c.name} onChange={e => patchContact(li, ci, { name: e.target.value })} placeholder="Full name" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                        <Field label="ROLE / TITLE"><input value={c.role} onChange={e => patchContact(li, ci, { role: e.target.value })} placeholder="e.g. Sales Rep" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                        <Field label="DIRECT PHONE"><input value={c.phone} onChange={e => patchContact(li, ci, { phone: e.target.value })} placeholder="(000) 000-0000" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                        <Field label="EMAIL"><input value={c.email} onChange={e => patchContact(li, ci, { email: e.target.value })} placeholder="name@company.com" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                        {loc.contacts.length > 1 && <button onClick={() => patchLoc(li, { contacts: loc.contacts.filter((_, k) => k !== ci) })} style={{ position: 'absolute', top: 6, right: 6, background: 'none', border: 'none', cursor: 'pointer', font: '600 12px/1', color: 'var(--color-neutral-400)' }}>✕</button>}
+                      </div>
+                    ))}
+                    <button onClick={() => patchLoc(li, { contacts: [...loc.contacts, { name: '', role: '', phone: '', email: '' }] })} style={{ padding: '6px 12px', border: '1px solid var(--color-divider)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', color: 'var(--color-neutral-600)', alignSelf: 'flex-start' }}>+ ADD CONTACT</button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
-        )}
-      </Field>
-      <Field label="BRIEF DESCRIPTION"><textarea value={about} onChange={e => setAbout(e.target.value)} placeholder="What this vendor does, notable strengths" rows={2} style={{ ...inputStyle, padding: '8px 10px', resize: 'vertical' }} /></Field>
-      <Field label="PRODUCTS / WHAT THEY SUPPLY"><textarea value={products} onChange={e => setProducts(e.target.value)} placeholder="List the products or materials they supply" rows={2} style={{ ...inputStyle, padding: '8px 10px', resize: 'vertical' }} /></Field>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        <Field label="LEAD TIME"><input value={leadTime} onChange={e => setLeadTime(e.target.value)} placeholder="e.g. 6–8 wks" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
-        <Field label="QUOTE TURNAROUND"><input value={quoteTurnaround} onChange={e => setQuoteTurnaround(e.target.value)} placeholder="e.g. 2–3 days" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+        </div>
+        <div style={{ padding: '14px 24px', borderTop: '2px solid var(--color-text)', display: 'flex', gap: 10, flexShrink: 0 }}>
+          <Button onClick={save}>SAVE VENDOR</Button>
+          <Button variant="secondary" onClick={close}>CANCEL</Button>
+        </div>
       </div>
-      <div>
-        <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.12em', color: 'var(--color-neutral-600)', marginBottom: 10 }}>CONTACTS</div>
-        {contacts.map((c, i) => (
-          <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12, padding: 14, background: 'var(--color-neutral-100)', position: 'relative' }}>
-            <Field label="NAME"><input value={c.name} onChange={e => setContacts(cs => cs.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} placeholder="Full name" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
-            <Field label="ROLE / TITLE"><input value={c.role} onChange={e => setContacts(cs => cs.map((x, j) => j === i ? { ...x, role: e.target.value } : x))} placeholder="e.g. Sales Rep" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
-            <Field label="PHONE"><input value={c.phone} onChange={e => setContacts(cs => cs.map((x, j) => j === i ? { ...x, phone: e.target.value } : x))} placeholder="(000) 000-0000" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
-            <Field label="EMAIL"><input value={c.email} onChange={e => setContacts(cs => cs.map((x, j) => j === i ? { ...x, email: e.target.value } : x))} placeholder="name@company.com" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
-            {contacts.length > 1 && <button onClick={() => setContacts(cs => cs.filter((_, j) => j !== i))} style={{ position: 'absolute', top: 8, right: 8, background: 'none', border: 'none', cursor: 'pointer', font: '600 11px/1', color: 'var(--color-neutral-500)' }}>✕</button>}
+    </div>
+  );
+}
+
+function EditVendorForm({ vendor, setSt, close }: { vendor: Vendor; setSt: React.Dispatch<React.SetStateAction<AppState>>; close: () => void }) {
+  const [name, setName] = React.useState(vendor.name);
+  const [trade, setTrade] = React.useState(vendor.trade);
+  const [about, setAbout] = React.useState(vendor.about);
+  const [leadTime, setLeadTime] = React.useState(vendor.leadTime === '—' ? '' : vendor.leadTime);
+  const [quoteTurnaround, setQuoteTurnaround] = React.useState(vendor.quoteTurnaround === '—' ? '' : vendor.quoteTurnaround);
+  const [materials, setMaterials] = React.useState<string[]>(vendor.materials || []);
+  const [locations, setLocations] = React.useState<DraftLocation[]>(
+    vendor.locations.map(l => ({ id: l.id, territory: l.territory, address: l.address, phone: l.phone, contacts: l.contacts.length ? l.contacts.map(c => ({ ...c })) : [{ name: '', role: '', phone: '', email: '' }] }))
+  );
+
+  const isBuiltIn = !vendor.id.startsWith('uv');
+
+  function patchLoc(i: number, patch: Partial<DraftLocation>) {
+    setLocations(ls => ls.map((l, j) => j === i ? { ...l, ...patch } : l));
+  }
+  function patchContact(li: number, ci: number, patch: Partial<DraftLocation['contacts'][0]>) {
+    setLocations(ls => ls.map((l, j) => j === li ? { ...l, contacts: l.contacts.map((c, k) => k === ci ? { ...c, ...patch } : c) } : l));
+  }
+
+  function save() {
+    if (!name.trim()) return;
+    const cleanLocs: VendorLocation[] = locations.filter(l => l.territory.trim()).map(l => ({
+      id: l.id, territory: l.territory.trim(), address: l.address.trim(), phone: l.phone.trim(),
+      contacts: l.contacts.filter(c => c.name.trim()),
+    }));
+    const updated: Vendor = { id: vendor.id, name: name.trim(), trade, about: about.trim(), leadTime: leadTime.trim() || '—', quoteTurnaround: quoteTurnaround.trim() || '—', materials, locations: cleanLocs };
+    if (isBuiltIn) {
+      // Built-in vendors: store override in userVendors with same id, filter out old override first
+      setSt(s => ({ ...s, userVendors: [...(s.userVendors || []).filter(v => v.id !== vendor.id), updated], resEditVendorId: null }));
+    } else {
+      setSt(s => ({ ...s, userVendors: (s.userVendors || []).map(v => v.id === vendor.id ? updated : v), resEditVendorId: null }));
+    }
+    close();
+  }
+
+  function deleteVendor() {
+    if (!window.confirm(`Remove ${vendor.name} from your vendor list?`)) return;
+    if (isBuiltIn) {
+      // Can't delete built-ins — just close
+      close();
+      return;
+    }
+    setSt(s => ({ ...s, userVendors: (s.userVendors || []).filter(v => v.id !== vendor.id), resSelectedVendor: null, resEditVendorId: null }));
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.5)', display: 'grid', placeItems: 'center', zIndex: 200 }}>
+      <div style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 720, maxWidth: '98vw', maxHeight: '94vh', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '16px 24px', borderBottom: '2px solid var(--color-text)', font: '800 15px/1 var(--font-heading)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          EDIT VENDOR
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            {!isBuiltIn && <button onClick={deleteVendor} style={{ padding: '6px 14px', border: '1px solid var(--color-accent)', background: 'none', color: 'var(--color-accent)', font: '600 10px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer' }}>DELETE</button>}
+            <button onClick={close} style={{ background: 'none', border: 'none', font: '400 18px/1', cursor: 'pointer', color: 'var(--color-neutral-500)' }}>✕</button>
           </div>
-        ))}
-        <button onClick={() => setContacts(cs => [...cs, { name: '', role: '', phone: '', email: '' }])} style={{ padding: '7px 14px', border: '1px solid var(--color-divider)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>+ ADD CONTACT</button>
+        </div>
+        <div style={{ flex: 1, overflow: 'auto', padding: 24, display: 'flex', flexDirection: 'column', gap: 18 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            <div style={{ gridColumn: '1/-1' }}>
+              <Field label="COMPANY NAME"><input value={name} onChange={e => setName(e.target.value)} style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+            </div>
+            <Field label="TRADE">
+              <select value={trade} onChange={e => setTrade(e.target.value)} style={{ ...inputStyle, padding: '8px 10px', flex: 1, appearance: 'none' }}>
+                {VENDOR_TRADES.slice(1).map(t => <option key={t} value={t}>{t}</option>)}
+                {!VENDOR_TRADES.includes(trade) && <option value={trade}>{trade}</option>}
+              </select>
+            </Field>
+            <Field label="LEAD TIME"><input value={leadTime} onChange={e => setLeadTime(e.target.value)} placeholder="e.g. 6–8 wks" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+            <Field label="QUOTE TURNAROUND"><input value={quoteTurnaround} onChange={e => setQuoteTurnaround(e.target.value)} placeholder="e.g. 2–3 days" style={{ ...inputStyle, padding: '8px 10px' }} /></Field>
+            <div style={{ gridColumn: '1/-1' }}>
+              <Field label="MATERIALS SUPPLIED (press Enter or click ADD after each)">
+                <MaterialsInput materials={materials} setMaterials={setMaterials} />
+              </Field>
+            </div>
+            <div style={{ gridColumn: '1/-1' }}>
+              <Field label="ABOUT / DESCRIPTION"><textarea value={about} onChange={e => setAbout(e.target.value)} rows={2} style={{ ...inputStyle, padding: '8px 10px', resize: 'vertical' }} /></Field>
+            </div>
+          </div>
+          {/* Locations */}
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, paddingBottom: 8, borderBottom: '1px solid var(--color-divider)' }}>
+              <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.14em' }}>LOCATIONS & CONTACTS</div>
+              <button onClick={() => setLocations(ls => [...ls, emptyLocation()])} style={{ padding: '5px 12px', background: 'var(--color-text)', color: '#fff', border: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>+ ADD LOCATION</button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {locations.map((loc, li) => (
+                <div key={loc.id} style={{ border: '1px solid var(--color-divider)' }}>
+                  <div style={{ padding: '12px 16px', background: 'var(--color-neutral-100)', borderBottom: '1px solid var(--color-divider)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ font: '600 11px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-accent)' }}>LOCATION {li + 1}</div>
+                    {locations.length > 1 && <button onClick={() => setLocations(ls => ls.filter((_, j) => j !== li))} style={{ padding: '3px 8px', border: '1px solid var(--color-neutral-400)', background: 'none', font: '600 9px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>REMOVE</button>}
+                  </div>
+                  <div style={{ padding: '14px 16px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, borderBottom: '1px solid var(--color-divider)' }}>
+                    <div style={{ gridColumn: '1/-1' }}><Field label="TERRITORY / REGION NAME"><input value={loc.territory} onChange={e => patchLoc(li, { territory: e.target.value })} placeholder="e.g. Charlotte / Carolinas" style={{ ...inputStyle, padding: '7px 10px' }} /></Field></div>
+                    <div style={{ gridColumn: '1/-1' }}><Field label="ADDRESS"><input value={loc.address} onChange={e => patchLoc(li, { address: e.target.value })} placeholder="Street, City, ST ZIP" style={{ ...inputStyle, padding: '7px 10px' }} /></Field></div>
+                    <Field label="OFFICE PHONE"><input value={loc.phone} onChange={e => patchLoc(li, { phone: e.target.value })} placeholder="(000) 000-0000" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                  </div>
+                  <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)' }}>CONTACTS</div>
+                    {loc.contacts.map((c, ci) => (
+                      <div key={ci} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px', background: 'var(--color-neutral-100)', position: 'relative' }}>
+                        <Field label="NAME"><input value={c.name} onChange={e => patchContact(li, ci, { name: e.target.value })} placeholder="Full name" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                        <Field label="ROLE / TITLE"><input value={c.role} onChange={e => patchContact(li, ci, { role: e.target.value })} placeholder="e.g. Sales Rep" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                        <Field label="DIRECT PHONE"><input value={c.phone} onChange={e => patchContact(li, ci, { phone: e.target.value })} placeholder="(000) 000-0000" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                        <Field label="EMAIL"><input value={c.email} onChange={e => patchContact(li, ci, { email: e.target.value })} placeholder="name@company.com" style={{ ...inputStyle, padding: '7px 10px' }} /></Field>
+                        {loc.contacts.length > 1 && <button onClick={() => patchLoc(li, { contacts: loc.contacts.filter((_, k) => k !== ci) })} style={{ position: 'absolute', top: 6, right: 6, background: 'none', border: 'none', cursor: 'pointer', font: '600 12px/1', color: 'var(--color-neutral-400)' }}>✕</button>}
+                      </div>
+                    ))}
+                    <button onClick={() => patchLoc(li, { contacts: [...loc.contacts, { name: '', role: '', phone: '', email: '' }] })} style={{ padding: '6px 12px', border: '1px solid var(--color-divider)', background: 'none', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer', color: 'var(--color-neutral-600)', alignSelf: 'flex-start' }}>+ ADD CONTACT</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div style={{ padding: '14px 24px', borderTop: '2px solid var(--color-text)', display: 'flex', gap: 10, flexShrink: 0 }}>
+          <Button onClick={save}>SAVE CHANGES</Button>
+          <Button variant="secondary" onClick={close}>CANCEL</Button>
+        </div>
       </div>
-      <FormFooter onSave={save} onCancel={close} />
     </div>
   );
 }
