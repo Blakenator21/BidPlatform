@@ -49,7 +49,7 @@ const inp = inputStyle;
 
 // ─── types ────────────────────────────────────────────────────────────────────
 type View = 'myday' | 'overview' | 'calendar' | 'capacity' | 'teamcapacity' | 'projects' | 'teamconnection' | 'resources' | 'meetings' | 'vendors';
-type AppTab = 'board' | 'tracker' | 'teamconnection' | 'resources' | 'vendors' | 'companies' | 'bizdev';
+type AppTab = 'board' | 'tracker' | 'teamconnection' | 'resources' | 'vendors' | 'companies' | 'bizdev' | 'companycal';
 type BdRep = 'john' | 'danielle' | 'jaramia' | 'newguy' | 'hot';
 type BdSubTab = 'projects' | 'ainotes' | 'calendar';
 
@@ -157,6 +157,22 @@ interface AppState {
     id: string; at: number; source: string; projectId: string;
     transcript: string; notesAdded: number; tasksAdded: number;
   }>;
+  companyEvents: CompanyEvent[];
+}
+
+type CompanyEventCategory = 'holiday' | 'lunchandlearn' | 'companyevent' | 'other';
+interface CompanyEvent {
+  id: string;
+  title: string;
+  date: string; // ISO yyyy-mm-dd
+  endDate?: string; // for multi-day events
+  time?: string; // e.g. "10:00"
+  endTime?: string;
+  allDay: boolean;
+  category: CompanyEventCategory;
+  location?: string;
+  description?: string;
+  attendees?: string; // free-text list
 }
 
 type MemberStatus = 'available' | 'busy' | 'in-meeting' | 'out-of-town' | 'out-of-office' | 'do-not-disturb';
@@ -257,6 +273,21 @@ function initState(userId: string): AppState {
     meetingRecordingBlob: null,
     meetingDraft: null,
     meetingHistory: [],
+    companyEvents: [
+      { id: 'ce1', title: 'Labor Day', date: '2026-09-07', allDay: true, category: 'holiday', description: 'Company Holiday — Office Closed' },
+      { id: 'ce2', title: 'Lunch & Learn: Kawneer Systems', date: '2026-09-17', allDay: false, time: '12:00', endTime: '13:00', category: 'lunchandlearn', location: 'Charlotte Conference Room', description: 'Kawneer product rep presenting new framing system updates and performance data.', attendees: 'All Estimating Staff' },
+      { id: 'ce3', title: 'Q3 Company All-Hands', date: '2026-09-24', allDay: false, time: '09:00', endTime: '11:00', category: 'companyevent', location: 'Charlotte HQ — Main Floor', description: 'Q3 review, project pipeline update, and team announcements.', attendees: 'All Staff' },
+      { id: 'ce4', title: 'Lunch & Learn: Glass Tech Innovations', date: '2026-10-08', allDay: false, time: '12:00', endTime: '13:00', category: 'lunchandlearn', location: 'Atlanta Office', description: 'Structural glass and frameless systems demo from GTI.', attendees: 'Atlanta Estimating' },
+      { id: 'ce5', title: 'Columbus Day', date: '2026-10-12', allDay: true, category: 'holiday', description: 'Company Holiday — Office Closed' },
+      { id: 'ce6', title: 'BD Team Retreat', date: '2026-10-15', endDate: '2026-10-16', allDay: true, category: 'companyevent', location: 'Lake Norman', description: 'Annual BD strategy retreat. All BD reps required.' },
+      { id: 'ce7', title: 'Veterans Day', date: '2026-11-11', allDay: true, category: 'holiday', description: 'Company Holiday — Office Closed' },
+      { id: 'ce8', title: 'Thanksgiving', date: '2026-11-26', allDay: true, category: 'holiday', description: 'Company Holiday — Office Closed' },
+      { id: 'ce9', title: 'Day After Thanksgiving', date: '2026-11-27', allDay: true, category: 'holiday', description: 'Company Holiday — Office Closed' },
+      { id: 'ce10', title: 'Holiday Party', date: '2026-12-11', allDay: false, time: '17:30', endTime: '21:00', category: 'companyevent', location: 'TBD', description: 'Annual company holiday celebration.', attendees: 'All Staff + Guests' },
+      { id: 'ce11', title: 'Christmas Eve', date: '2026-12-24', allDay: true, category: 'holiday', description: 'Company Holiday — Office Closed' },
+      { id: 'ce12', title: 'Christmas Day', date: '2026-12-25', allDay: true, category: 'holiday', description: 'Company Holiday — Office Closed' },
+      { id: 'ce13', title: 'New Year\'s Eve', date: '2026-12-31', allDay: true, category: 'holiday', description: 'Company Holiday — Office Closed' },
+    ],
   };
 }
 
@@ -1583,7 +1614,7 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--color-bg)', overflow: 'hidden' }}>
       {/* ── top tab strip ── */}
       <div style={{ display: 'flex', alignItems: 'stretch', height: 38, background: 'var(--color-text)', flexShrink: 0, zIndex: 50 }}>
-        {([['board', 'BID BOARD'], ['tracker', 'TASK TRACKER'], ['companies', 'COMPANY CONTACTS'], ['bizdev', 'BUSINESS DEVELOPMENT'], ['teamconnection', 'TEAM CONNECTION'], ['resources', 'RESOURCES'], ['vendors', 'VENDOR CONTACTS']] as [AppTab, string][]).map(([a, label]) => (
+        {([['board', 'BID BOARD'], ['tracker', 'TASK TRACKER'], ['companies', 'COMPANY CONTACTS'], ['bizdev', 'BUSINESS DEVELOPMENT'], ['teamconnection', 'TEAM CONNECTION'], ['resources', 'RESOURCES'], ['companycal', 'COMPANY CALENDAR'], ['vendors', 'VENDOR CONTACTS']] as [AppTab, string][]).map(([a, label]) => (
           <button key={a} onClick={() => setSt(s => ({ ...s, app: a }))} style={{ padding: '0 22px', border: 'none', cursor: 'pointer', background: st.app === a ? 'var(--color-accent)' : 'transparent', color: '#fff', font: '600 11px/1 var(--font-body)', letterSpacing: '.12em', position: 'relative' }}>
             {label}
             {a === 'teamconnection' && tcUnread > 0 && <span style={{ position: 'absolute', top: 6, right: 8, width: 7, height: 7, background: '#22c55e', borderRadius: '50%' }} />}
@@ -1597,6 +1628,7 @@ function MainApp({ userId, onSignOut }: { userId: string; onSignOut: () => void 
       {st.app === 'vendors' && <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}><VendorContactsView st={st} setSt={setSt} me={me} /></div>}
       {st.app === 'companies' && <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}><CompanyContactsView st={st} setSt={setSt} me={me} flash={flash} /></div>}
       {st.app === 'bizdev' && <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}><BizDevView st={st} setSt={setSt} me={me} flash={flash} /></div>}
+      {st.app === 'companycal' && <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}><CompanyCalendarView st={st} setSt={setSt} me={me} flash={flash} /></div>}
       {st.app === 'tracker' && (
         <div style={{ flex: 1, display: 'flex', minHeight: 0, overflow: 'hidden', height: 'calc(100vh - 38px)' }}>
           {/* ── sidebar ── */}
@@ -3954,6 +3986,319 @@ function effectiveFollowUp(bid: BidProject): string {
 }
 
 
+// ─── Company Calendar ────────────────────────────────────────────────────────
+const CAL_CATS: Record<CompanyEventCategory, { label: string; color: string; bg: string; dot: string }> = {
+  holiday:      { label: 'Holiday',       color: '#b91c1c', bg: '#fef2f2', dot: '#ef4444' },
+  lunchandlearn:{ label: 'Lunch & Learn', color: '#0369a1', bg: '#eff6ff', dot: '#3b82f6' },
+  companyevent: { label: 'Company Event', color: '#065f46', bg: '#ecfdf5', dot: '#10b981' },
+  other:        { label: 'Other',         color: '#6b21a8', bg: '#faf5ff', dot: '#a855f7' },
+};
+
+function daysInMonth(year: number, month: number): number {
+  return new Date(year, month + 1, 0).getDate();
+}
+function firstDayOfMonth(year: number, month: number): number {
+  return new Date(year, month, 1).getDay(); // 0=Sun
+}
+function isoDate(year: number, month: number, day: number): string {
+  return year + '-' + String(month + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+}
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+function CompanyCalendarView({ st, setSt, me: _me, flash }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person; flash: (m: string) => void }) {
+  const now = new Date();
+  const [viewYear, setViewYear] = useState(now.getFullYear());
+  const [viewMonth, setViewMonth] = useState(now.getMonth());
+  const [selectedEvent, setSelectedEvent] = useState<CompanyEvent | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [filterCat, setFilterCat] = useState<CompanyEventCategory | 'all'>('all');
+  const [editingEvent, setEditingEvent] = useState<CompanyEvent | null>(null);
+  const [form, setForm] = useState<Partial<CompanyEvent>>({
+    title: '', date: '', endDate: '', time: '', endTime: '', allDay: true,
+    category: 'companyevent', location: '', description: '', attendees: ''
+  });
+
+  const todayStr = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0');
+
+  function prevMonth() {
+    if (viewMonth === 0) { setViewYear(y => y - 1); setViewMonth(11); }
+    else setViewMonth(m => m - 1);
+  }
+  function nextMonth() {
+    if (viewMonth === 11) { setViewYear(y => y + 1); setViewMonth(0); }
+    else setViewMonth(m => m + 1);
+  }
+
+  const allCompanyEvents = st.companyEvents ?? [];
+  const events = allCompanyEvents.filter(e => filterCat === 'all' || e.category === filterCat);
+  const days = daysInMonth(viewYear, viewMonth);
+  const startDow = firstDayOfMonth(viewYear, viewMonth);
+
+  function eventsOnDay(dayStr: string): CompanyEvent[] {
+    return events.filter(e => {
+      if (e.endDate && e.endDate > e.date) {
+        return dayStr >= e.date && dayStr <= e.endDate;
+      }
+      return e.date === dayStr;
+    });
+  }
+
+  function openAdd(dateStr?: string) {
+    setEditingEvent(null);
+    setForm({ title: '', date: dateStr || '', endDate: '', time: '', endTime: '', allDay: true, category: 'companyevent', location: '', description: '', attendees: '' });
+    setShowForm(true);
+  }
+  function openEdit(ev: CompanyEvent) {
+    setSelectedEvent(null);
+    setEditingEvent(ev);
+    setForm({ ...ev });
+    setShowForm(true);
+  }
+  function saveForm() {
+    if (!form.title || !form.date) return;
+    if (editingEvent) {
+      setSt(s => ({ ...s, companyEvents: (s.companyEvents ?? []).map(e => e.id === editingEvent.id ? { ...editingEvent, ...form, id: editingEvent.id } as CompanyEvent : e) }));
+      flash('Event updated');
+    } else {
+      const ne: CompanyEvent = { id: 'ce' + Date.now(), title: form.title!, date: form.date!, endDate: form.endDate || undefined, time: form.time || undefined, endTime: form.endTime || undefined, allDay: form.allDay ?? true, category: form.category as CompanyEventCategory || 'companyevent', location: form.location || undefined, description: form.description || undefined, attendees: form.attendees || undefined };
+      setSt(s => ({ ...s, companyEvents: [...(s.companyEvents ?? []), ne] }));
+      flash('Event added');
+    }
+    setShowForm(false);
+  }
+  function deleteEvent(id: string) {
+    setSt(s => ({ ...s, companyEvents: (s.companyEvents ?? []).filter(e => e.id !== id) }));
+    setSelectedEvent(null);
+    flash('Event deleted');
+  }
+
+  // Calendar grid cells
+  const cells: Array<{ dayStr: string | null; dayNum: number | null }> = [];
+  for (let i = 0; i < startDow; i++) cells.push({ dayStr: null, dayNum: null });
+  for (let d = 1; d <= days; d++) cells.push({ dayStr: isoDate(viewYear, viewMonth, d), dayNum: d });
+  while (cells.length % 7 !== 0) cells.push({ dayStr: null, dayNum: null });
+
+  // Upcoming events list
+  const upcoming = [...allCompanyEvents]
+    .filter(e => (filterCat === 'all' || e.category === filterCat) && e.date >= todayStr)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(0, 8);
+
+  function fmtDate(d: string) {
+    const [y, m, day] = d.split('-');
+    return MONTH_NAMES[parseInt(m) - 1] + ' ' + parseInt(day) + ', ' + y;
+  }
+  function fmtTime(t?: string) {
+    if (!t) return '';
+    const [h, min] = t.split(':').map(Number);
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    return ((h % 12) || 12) + ':' + String(min).padStart(2, '0') + ' ' + ampm;
+  }
+
+  return (
+    <div style={{ display: 'flex', height: '100%', minHeight: 0, background: '#f8f9fa', fontFamily: 'system-ui, sans-serif' }}>
+      {/* Sidebar */}
+      <div style={{ width: 240, flexShrink: 0, background: '#fff', borderRight: '1px solid #e5e7eb', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ padding: '20px 16px 12px', borderBottom: '1px solid #e5e7eb' }}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.1em', color: '#6b7280', marginBottom: 12 }}>COMPANY CALENDAR</div>
+          <button onClick={() => openAdd()} style={{ width: '100%', padding: '9px 0', background: '#1e293b', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, letterSpacing: '0.05em', cursor: 'pointer' }}>+ ADD EVENT</button>
+        </div>
+        <div style={{ padding: '14px 16px 8px', borderBottom: '1px solid #f1f5f9' }}>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.1em', color: '#9ca3af', marginBottom: 8 }}>FILTER BY TYPE</div>
+          {([['all', 'All Events', '#374151', '#f3f4f6', '#6b7280']] as [string, string, string, string, string][]).concat(
+            (Object.entries(CAL_CATS) as [CompanyEventCategory, typeof CAL_CATS[CompanyEventCategory]][]).map(([k, v]) => [k, v.label, v.color, v.bg, v.dot] as [string, string, string, string, string])
+          ).map(([k, label, color, bg, dot]) => (
+            <button key={k} onClick={() => setFilterCat(k as CompanyEventCategory | 'all')} style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '6px 8px', marginBottom: 2, borderRadius: 5, border: 'none', background: filterCat === k ? bg : 'transparent', cursor: 'pointer', textAlign: 'left' }}>
+              <div style={{ width: 8, height: 8, borderRadius: '50%', background: dot, flexShrink: 0 }} />
+              <span style={{ fontSize: 12, fontWeight: filterCat === k ? 700 : 400, color: filterCat === k ? color : '#374151' }}>{label}</span>
+            </button>
+          ))}
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 16px' }}>
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.1em', color: '#9ca3af', marginBottom: 8 }}>UPCOMING</div>
+          {upcoming.length === 0 && <div style={{ fontSize: 12, color: '#9ca3af' }}>No upcoming events</div>}
+          {upcoming.map(ev => {
+            const cat = CAL_CATS[ev.category];
+            return (
+              <button key={ev.id} onClick={() => setSelectedEvent(ev)} style={{ display: 'block', width: '100%', textAlign: 'left', padding: '8px 10px', marginBottom: 6, borderRadius: 6, border: '1px solid ' + cat.bg, background: cat.bg, cursor: 'pointer' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: cat.dot, flexShrink: 0 }} />
+                  <span style={{ fontSize: 11, fontWeight: 700, color: cat.color, letterSpacing: '0.04em' }}>{cat.label.toUpperCase()}</span>
+                </div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#1e293b', marginBottom: 2 }}>{ev.title}</div>
+                <div style={{ fontSize: 11, color: '#6b7280' }}>{fmtDate(ev.date)}</div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Main calendar area */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '14px 24px', background: '#fff', borderBottom: '1px solid #e5e7eb', flexShrink: 0 }}>
+          <button onClick={prevMonth} style={{ width: 30, height: 30, border: '1px solid #e5e7eb', borderRadius: 6, background: '#fff', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#374151' }}>{'<'}</button>
+          <div style={{ fontSize: 20, fontWeight: 700, color: '#1e293b', minWidth: 220, textAlign: 'center' }}>{MONTH_NAMES[viewMonth]} {viewYear}</div>
+          <button onClick={nextMonth} style={{ width: 30, height: 30, border: '1px solid #e5e7eb', borderRadius: 6, background: '#fff', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#374151' }}>{'>'}</button>
+          <button onClick={() => { setViewYear(now.getFullYear()); setViewMonth(now.getMonth()); }} style={{ marginLeft: 8, padding: '5px 12px', border: '1px solid #e5e7eb', borderRadius: 6, background: '#fff', cursor: 'pointer', fontSize: 11, fontWeight: 600, color: '#374151', letterSpacing: '0.04em' }}>TODAY</button>
+        </div>
+
+        {/* Day-of-week header */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', background: '#f8fafc', borderBottom: '1px solid #e5e7eb', flexShrink: 0 }}>
+          {DOW.map(d => (
+            <div key={d} style={{ padding: '6px 0', textAlign: 'center', fontSize: 11, fontWeight: 700, letterSpacing: '0.07em', color: '#94a3b8' }}>{d.toUpperCase()}</div>
+          ))}
+        </div>
+
+        {/* Calendar grid */}
+        <div style={{ flex: 1, overflowY: 'auto', display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gridAutoRows: 'minmax(90px, 1fr)', background: '#e5e7eb', gap: 1 }}>
+          {cells.map((cell, i) => {
+            if (!cell.dayStr) return <div key={i} style={{ background: '#f8fafc' }} />;
+            const dayEvs = eventsOnDay(cell.dayStr);
+            const isToday = cell.dayStr === todayStr;
+            return (
+              <div key={cell.dayStr} onClick={() => openAdd(cell.dayStr ?? undefined)} style={{ background: '#fff', padding: '6px 6px 4px', cursor: 'pointer', position: 'relative', minHeight: 90 }}>
+                <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 24, height: 24, borderRadius: '50%', background: isToday ? '#1e293b' : 'transparent', marginBottom: 4 }}>
+                  <span style={{ fontSize: 12, fontWeight: isToday ? 700 : 400, color: isToday ? '#fff' : '#374151' }}>{cell.dayNum}</span>
+                </div>
+                {dayEvs.slice(0, 3).map(ev => {
+                  const cat = CAL_CATS[ev.category];
+                  return (
+                    <div key={ev.id} onClick={(e) => { e.stopPropagation(); setSelectedEvent(ev); }} style={{ padding: '2px 5px', marginBottom: 2, borderRadius: 3, background: cat.bg, borderLeft: '3px solid ' + cat.dot, fontSize: 10, fontWeight: 600, color: cat.color, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', cursor: 'pointer' }}>
+                      {ev.title}
+                    </div>
+                  );
+                })}
+                {dayEvs.length > 3 && <div style={{ fontSize: 10, color: '#6b7280', paddingLeft: 4 }}>+{dayEvs.length - 3} more</div>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Event detail modal */}
+      {selectedEvent && (() => {
+        const ev = selectedEvent;
+        const cat = CAL_CATS[ev.category];
+        return (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={() => setSelectedEvent(null)}>
+            <div style={{ background: '#fff', borderRadius: 12, width: 460, maxHeight: '80vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.25)' }} onClick={e => e.stopPropagation()}>
+              <div style={{ background: cat.bg, borderBottom: '2px solid ' + cat.dot, padding: '20px 24px 16px', borderRadius: '12px 12px 0 0' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <div style={{ width: 10, height: 10, borderRadius: '50%', background: cat.dot }} />
+                  <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.1em', color: cat.color }}>{cat.label.toUpperCase()}</span>
+                </div>
+                <div style={{ fontSize: 20, fontWeight: 700, color: '#1e293b', marginBottom: 4 }}>{ev.title}</div>
+                <div style={{ fontSize: 13, color: '#475569' }}>{fmtDate(ev.date)}{ev.endDate && ev.endDate !== ev.date ? ' — ' + fmtDate(ev.endDate) : ''}</div>
+              </div>
+              <div style={{ padding: '20px 24px' }}>
+                {!ev.allDay && (ev.time || ev.endTime) && (
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14 }}>
+                    <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, width: 80 }}>TIME</span>
+                    <span style={{ fontSize: 13, color: '#1e293b' }}>{fmtTime(ev.time)}{ev.endTime ? ' – ' + fmtTime(ev.endTime) : ''}</span>
+                  </div>
+                )}
+                {ev.location && (
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14 }}>
+                    <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, width: 80, paddingTop: 1 }}>LOCATION</span>
+                    <span style={{ fontSize: 13, color: '#1e293b' }}>{ev.location}</span>
+                  </div>
+                )}
+                {ev.description && (
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, marginBottom: 4 }}>DESCRIPTION</div>
+                    <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.5, background: '#f8fafc', padding: '10px 12px', borderRadius: 6 }}>{ev.description}</div>
+                  </div>
+                )}
+                {ev.attendees && (
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, marginBottom: 4 }}>ATTENDEES</div>
+                    <div style={{ fontSize: 13, color: '#374151' }}>{ev.attendees}</div>
+                  </div>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 8, padding: '0 24px 20px' }}>
+                <button onClick={() => openEdit(ev)} style={{ flex: 1, padding: '9px 0', background: '#1e293b', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer', letterSpacing: '0.05em' }}>EDIT</button>
+                <button onClick={() => deleteEvent(ev.id)} style={{ padding: '9px 16px', background: '#fef2f2', color: '#b91c1c', border: '1px solid #fecaca', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>DELETE</button>
+                <button onClick={() => setSelectedEvent(null)} style={{ padding: '9px 16px', background: '#f8fafc', color: '#374151', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>CLOSE</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Add/Edit event form modal */}
+      {showForm && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={() => setShowForm(false)}>
+          <div style={{ background: '#fff', borderRadius: 12, width: 480, maxHeight: '90vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.25)' }} onClick={e => e.stopPropagation()}>
+            <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid #e5e7eb' }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: '#1e293b' }}>{editingEvent ? 'Edit Event' : 'Add Event'}</div>
+            </div>
+            <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', letterSpacing: '0.07em', display: 'block', marginBottom: 4 }}>TITLE *</label>
+                <input value={form.title || ''} onChange={e => setForm(f => ({ ...f, title: e.target.value }))} placeholder="Event title" style={{ width: '100%', padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', letterSpacing: '0.07em', display: 'block', marginBottom: 4 }}>CATEGORY</label>
+                <select value={form.category || 'companyevent'} onChange={e => setForm(f => ({ ...f, category: e.target.value as CompanyEventCategory }))} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13, outline: 'none', background: '#fff' }}>
+                  <option value="companyevent">Company Event</option>
+                  <option value="lunchandlearn">Lunch and Learn</option>
+                  <option value="holiday">Holiday</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', letterSpacing: '0.07em', display: 'block', marginBottom: 4 }}>START DATE *</label>
+                  <input type="date" value={form.date || ''} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', letterSpacing: '0.07em', display: 'block', marginBottom: 4 }}>END DATE</label>
+                  <input type="date" value={form.endDate || ''} onChange={e => setForm(f => ({ ...f, endDate: e.target.value }))} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <input type="checkbox" id="allday" checked={form.allDay ?? true} onChange={e => setForm(f => ({ ...f, allDay: e.target.checked }))} style={{ width: 15, height: 15, cursor: 'pointer' }} />
+                <label htmlFor="allday" style={{ fontSize: 12, fontWeight: 600, color: '#374151', cursor: 'pointer' }}>All Day</label>
+              </div>
+              {!form.allDay && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', letterSpacing: '0.07em', display: 'block', marginBottom: 4 }}>START TIME</label>
+                    <input type="time" value={form.time || ''} onChange={e => setForm(f => ({ ...f, time: e.target.value }))} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', letterSpacing: '0.07em', display: 'block', marginBottom: 4 }}>END TIME</label>
+                    <input type="time" value={form.endTime || ''} onChange={e => setForm(f => ({ ...f, endTime: e.target.value }))} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+                  </div>
+                </div>
+              )}
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', letterSpacing: '0.07em', display: 'block', marginBottom: 4 }}>LOCATION</label>
+                <input value={form.location || ''} onChange={e => setForm(f => ({ ...f, location: e.target.value }))} placeholder="Office, venue, or virtual link" style={{ width: '100%', padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', letterSpacing: '0.07em', display: 'block', marginBottom: 4 }}>DESCRIPTION</label>
+                <textarea value={form.description || ''} onChange={e => setForm(f => ({ ...f, description: e.target.value }))} placeholder="Event details..." rows={3} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13, outline: 'none', resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', letterSpacing: '0.07em', display: 'block', marginBottom: 4 }}>ATTENDEES</label>
+                <input value={form.attendees || ''} onChange={e => setForm(f => ({ ...f, attendees: e.target.value }))} placeholder="Names or teams" style={{ width: '100%', padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13, outline: 'none', boxSizing: 'border-box' }} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, padding: '0 24px 20px' }}>
+              <button onClick={saveForm} disabled={!form.title || !form.date} style={{ flex: 1, padding: '9px 0', background: !form.title || !form.date ? '#cbd5e1' : '#1e293b', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: !form.title || !form.date ? 'not-allowed' : 'pointer', letterSpacing: '0.05em' }}>{editingEvent ? 'SAVE CHANGES' : 'ADD EVENT'}</button>
+              <button onClick={() => setShowForm(false)} style={{ padding: '9px 16px', background: '#f8fafc', color: '#374151', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>CANCEL</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BizDevView({ st, setSt, me, flash }: { st: AppState; setSt: React.Dispatch<React.SetStateAction<AppState>>; me: Person; flash: (m: string) => void }) {
   const rep = st.bdRep;
   const subTab = st.bdSubTab;
@@ -4037,7 +4382,7 @@ function BdProjectsPanel({ bids, today, selectedId, repId, isHot, me, flash, set
   patchBid: (id: string, p: Partial<BidProject>) => void;
 }) {
   const [search, setSearch] = React.useState('');
-  const filtered = search ? bids.filter(b => b.name.toLowerCase().includes(search.toLowerCase()) || b.gc.toLowerCase().includes(search.toLowerCase())) : bids;
+  const [fuTab, setFuTab] = React.useState<'overdue' | 'thisweek' | 'nextweek' | 'upcoming'>('overdue');
   const selected = bids.find(b => b.id === selectedId) || null;
 
   const STATUS_BG: Record<string, string> = { pending: 'var(--color-neutral-600)', accepted: '#1f7a4d', declined: 'var(--color-accent)', review: 'oklch(0.50 0.18 240)' };
@@ -4045,7 +4390,7 @@ function BdProjectsPanel({ bids, today, selectedId, repId, isHot, me, flash, set
 
   // Compute week boundaries (Mon–Sun of current week)
   const todayDate = new Date(today + 'T12:00:00');
-  const dow = todayDate.getDay(); // 0=Sun
+  const dow = todayDate.getDay();
   const diffToMon = (dow === 0 ? -6 : 1 - dow);
   const weekStart = new Date(todayDate); weekStart.setDate(todayDate.getDate() + diffToMon);
   const weekEnd = new Date(weekStart); weekEnd.setDate(weekStart.getDate() + 6);
@@ -4056,24 +4401,38 @@ function BdProjectsPanel({ bids, today, selectedId, repId, isHot, me, flash, set
   const nws = nextWeekStart.toISOString().slice(0, 10);
   const nwe = nextWeekEnd.toISOString().slice(0, 10);
 
-  function fuGroup(b: BidProject): 'overdue' | 'thisweek' | 'nextweek' | 'upcoming' | 'none' {
+  function fuGroup(b: BidProject): 'overdue' | 'thisweek' | 'nextweek' | 'upcoming' {
     const fu = effectiveFollowUp(b);
-    if (!fu) return 'none';
-    if (fu < today) return 'overdue';
+    if (!fu || fu < today) return 'overdue';
     if (fu >= ws && fu <= we) return 'thisweek';
     if (fu >= nws && fu <= nwe) return 'nextweek';
     return 'upcoming';
   }
 
-  const GROUPS: Array<{ key: ReturnType<typeof fuGroup>; label: string; accent: string; bg: string; textColor: string; icon: string }> = [
-    { key: 'overdue',  label: 'FOLLOW-UPS PAST DUE',  accent: '#c0392b', bg: '#fff5f5', textColor: '#c0392b', icon: '⚠' },
-    { key: 'thisweek', label: 'FOLLOW-UPS THIS WEEK',  accent: '#b45309', bg: '#fffbf0', textColor: '#b45309', icon: '↻' },
-    { key: 'nextweek', label: 'FOLLOW-UPS NEXT WEEK',  accent: 'oklch(0.45 0.18 240)', bg: '#f0f5ff', textColor: 'oklch(0.45 0.18 240)', icon: '→' },
-    { key: 'upcoming', label: 'UPCOMING',              accent: 'var(--color-neutral-500)', bg: 'var(--color-neutral-100)', textColor: 'var(--color-neutral-600)', icon: '·' },
-    { key: 'none',     label: 'NO DATE SET',           accent: 'var(--color-neutral-400)', bg: 'var(--color-neutral-100)', textColor: 'var(--color-neutral-400)', icon: '—' },
+  type FuKey = 'overdue' | 'thisweek' | 'nextweek' | 'upcoming';
+  const GROUPS: Array<{ key: FuKey; label: string; shortLabel: string; accent: string; bg: string; textColor: string; borderColor: string }> = [
+    { key: 'overdue',  label: 'FOLLOW-UPS PAST DUE',  shortLabel: 'PAST DUE',   accent: '#c0392b', bg: '#fde8e8', textColor: '#c0392b', borderColor: '#fcc' },
+    { key: 'thisweek', label: 'THIS WEEK',             shortLabel: 'THIS WEEK',  accent: '#b45309', bg: '#fef3e0', textColor: '#b45309', borderColor: '#ffe0a0' },
+    { key: 'nextweek', label: 'NEXT WEEK',             shortLabel: 'NEXT WEEK',  accent: 'oklch(0.45 0.18 240)', bg: '#e8eeff', textColor: 'oklch(0.45 0.18 240)', borderColor: '#c8d8ff' },
+    { key: 'upcoming', label: 'BEYOND',                shortLabel: 'BEYOND',     accent: 'var(--color-neutral-500)', bg: 'var(--color-neutral-200)', textColor: 'var(--color-neutral-600)', borderColor: 'var(--color-divider)' },
   ];
 
-  function BdProjectCard({ b, group }: { b: BidProject; group: typeof GROUPS[0] }) {
+  // Counts per group (unfiltered by search, for tab badges)
+  const counts = Object.fromEntries(GROUPS.map(g => [g.key, bids.filter(b => fuGroup(b) === g.key).length])) as Record<FuKey, number>;
+
+  // Auto-advance fuTab to first non-empty group on mount / when bids change
+  React.useEffect(() => {
+    const firstNonEmpty = GROUPS.find(g => counts[g.key] > 0);
+    if (firstNonEmpty) setFuTab(firstNonEmpty.key);
+  }, [repId]);
+
+  const activeGroup = GROUPS.find(g => g.key === fuTab)!;
+
+  const listItems = bids
+    .filter(b => fuGroup(b) === fuTab)
+    .filter(b => !search || b.name.toLowerCase().includes(search.toLowerCase()) || b.gc.toLowerCase().includes(search.toLowerCase()));
+
+  function BdProjectCard({ b }: { b: BidProject }) {
     const fuDate = effectiveFollowUp(b);
     const daysUntil = fuDate ? Math.round((new Date(fuDate + 'T12:00:00').getTime() - new Date(today + 'T12:00:00').getTime()) / 86400000) : null;
     const isSelected = selectedId === b.id;
@@ -4081,15 +4440,13 @@ function BdProjectsPanel({ bids, today, selectedId, repId, isHot, me, flash, set
     const fuFormatted = fuDate ? new Date(fuDate + 'T12:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) : '';
     return (
       <button onClick={() => setSt(s => ({ ...s, bdSelectedProject: b.id }))}
-        style={{ width: '100%', padding: '0', border: 'none', borderBottom: '1px solid ' + (group.key === 'overdue' ? '#fcc' : group.key === 'thisweek' ? '#ffe5b4' : 'var(--color-divider)'), borderLeft: isSelected ? '4px solid ' + group.accent : '4px solid transparent', background: isSelected ? '#fff' : 'transparent', textAlign: 'left', cursor: 'pointer', display: 'flex', flexDirection: 'column' }}>
-        {/* Follow-up date bar */}
+        style={{ width: '100%', padding: '0', border: 'none', borderBottom: '1px solid ' + activeGroup.borderColor, borderLeft: isSelected ? '4px solid ' + activeGroup.accent : '4px solid transparent', background: isSelected ? '#fff' : 'transparent', textAlign: 'left', cursor: 'pointer', display: 'flex', flexDirection: 'column' }}>
         {fuDate && (
-          <div style={{ padding: '7px 12px 5px', background: isSelected ? group.accent : (group.key === 'overdue' ? '#fde8e8' : group.key === 'thisweek' ? '#fef3e0' : group.key === 'nextweek' ? '#e8eeff' : 'transparent'), display: 'flex', alignItems: 'baseline', gap: 8, borderBottom: '1px solid ' + (group.key === 'overdue' ? '#fcc' : group.key === 'thisweek' ? '#ffe0a0' : group.key === 'nextweek' ? '#c8d8ff' : 'transparent') }}>
-            <span style={{ font: '800 15px/1 var(--font-body)', color: isSelected ? '#fff' : group.accent, letterSpacing: '-.01em' }}>{fuFormatted}</span>
-            {fuLabel && <span style={{ font: '600 10px/1 var(--font-body)', color: isSelected ? 'rgba(255,255,255,.8)' : group.textColor, letterSpacing: '.04em' }}>{fuLabel}</span>}
+          <div style={{ padding: '7px 12px 5px', background: isSelected ? activeGroup.accent : activeGroup.bg, display: 'flex', alignItems: 'baseline', gap: 8, borderBottom: '1px solid ' + activeGroup.borderColor }}>
+            <span style={{ font: '800 15px/1 var(--font-body)', color: isSelected ? '#fff' : activeGroup.accent, letterSpacing: '-.01em' }}>{fuFormatted}</span>
+            {fuLabel && <span style={{ font: '600 10px/1 var(--font-body)', color: isSelected ? 'rgba(255,255,255,.8)' : activeGroup.textColor, letterSpacing: '.04em' }}>{fuLabel}</span>}
           </div>
         )}
-        {/* Project info */}
         <div style={{ padding: '8px 12px 10px' }}>
           <div style={{ font: '600 12.5px/1.2 var(--font-body)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 3 }}>{b.name}</div>
           <div style={{ font: '400 11px/1 var(--font-body)', color: 'var(--color-neutral-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 5 }}>{b.gc}</div>
@@ -4099,29 +4456,55 @@ function BdProjectsPanel({ bids, today, selectedId, repId, isHot, me, flash, set
     );
   }
 
-  const groupedFiltered = GROUPS.map(g => ({ ...g, items: filtered.filter(b => fuGroup(b) === g.key) })).filter(g => g.items.length > 0);
-
   return (
     <>
       {/* List Rail */}
       <div style={{ width: 300, flexShrink: 0, borderRight: '2px solid var(--color-text)', display: 'flex', flexDirection: 'column', background: 'var(--color-neutral-100)', overflow: 'hidden' }}>
-        <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--color-divider)', display: 'flex', gap: 8, alignItems: 'center' }}>
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search projects…" style={{ ...inp, flex: 1, padding: '7px 10px' }} />
+
+        {/* Follow-up group tabs */}
+        <div style={{ display: 'flex', borderBottom: '2px solid var(--color-divider)', background: '#fff', flexShrink: 0 }}>
+          {GROUPS.map(g => {
+            const cnt = counts[g.key];
+            const isEmpty = cnt === 0;
+            const isActive = fuTab === g.key;
+            if (isEmpty) {
+              // Minimized: thin labeled strip, no interaction weight
+              return (
+                <div key={g.key} style={{ flex: '0 0 auto', padding: '4px 8px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRight: '1px solid var(--color-divider)', opacity: 0.35, minWidth: 48 }}>
+                  <span style={{ font: '700 7px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-400)', textAlign: 'center' }}>{g.shortLabel}</span>
+                  <span style={{ font: '700 9px/1 var(--font-body)', color: 'var(--color-neutral-300)', marginTop: 2 }}>0</span>
+                </div>
+              );
+            }
+            return (
+              <button key={g.key} onClick={() => setFuTab(g.key)}
+                style={{ flex: 1, padding: isActive ? '10px 6px 8px' : '8px 6px', border: 'none', borderBottom: isActive ? '3px solid ' + g.accent : '3px solid transparent', borderRight: '1px solid var(--color-divider)', background: isActive ? g.bg : '#fff', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, transition: 'background .15s' }}>
+                <span style={{ font: '700 8px/1 var(--font-body)', letterSpacing: '.1em', color: isActive ? g.accent : 'var(--color-neutral-500)', textAlign: 'center' }}>{g.shortLabel}</span>
+                <span style={{ font: '800 16px/1 var(--font-body)', color: isActive ? g.accent : 'var(--color-neutral-400)' }}>{cnt}</span>
+              </button>
+            );
+          })}
         </div>
+
+        {/* Active tab header */}
+        <div style={{ padding: '7px 12px 6px', background: activeGroup.bg, borderBottom: '1px solid ' + activeGroup.borderColor, display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <span style={{ font: '800 9px/1 var(--font-body)', letterSpacing: '.14em', color: activeGroup.textColor, flex: 1 }}>{activeGroup.label}</span>
+          <span style={{ font: '700 9px/1 var(--font-body)', padding: '2px 6px', background: activeGroup.accent, color: '#fff', borderRadius: 2 }}>{counts[fuTab]}</span>
+        </div>
+
+        {/* Search */}
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--color-divider)', flexShrink: 0 }}>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search projects…" style={{ ...inp, width: '100%', padding: '7px 10px', boxSizing: 'border-box' }} />
+        </div>
+
+        {/* List */}
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          {groupedFiltered.length === 0 && (
-            <div style={{ padding: 20, ...T.meta }}>{isHot ? 'No active bids.' : 'No projects assigned to this rep in the CRM.'}</div>
-          )}
-          {groupedFiltered.map(g => (
-            <div key={g.key}>
-              {/* Section header */}
-              <div style={{ padding: '8px 12px 6px', background: g.key === 'overdue' ? '#fde8e8' : g.key === 'thisweek' ? '#fef3e0' : g.key === 'nextweek' ? '#e8eeff' : 'var(--color-neutral-200)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid ' + (g.key === 'overdue' ? '#fcc' : g.key === 'thisweek' ? '#ffe0a0' : g.key === 'nextweek' ? '#c8d8ff' : 'var(--color-divider)'), position: 'sticky', top: 0, zIndex: 1 }}>
-                <span style={{ font: '800 9px/1 var(--font-body)', letterSpacing: '.14em', color: g.textColor }}>{g.label}</span>
-                <span style={{ font: '700 9px/1 var(--font-body)', padding: '2px 6px', background: g.accent, color: '#fff', borderRadius: 2 }}>{g.items.length}</span>
-              </div>
-              {g.items.map(b => <BdProjectCard key={b.id} b={b} group={g} />)}
+          {listItems.length === 0 && (
+            <div style={{ padding: 20, ...T.meta }}>
+              {search ? 'No matching projects.' : isHot ? 'No active bids.' : 'No projects in this group.'}
             </div>
-          ))}
+          )}
+          {listItems.map(b => <BdProjectCard key={b.id} b={b} />)}
         </div>
       </div>
 
