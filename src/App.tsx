@@ -292,6 +292,16 @@ function initState(userId: string): AppState {
 }
 
 // ─── Bid Board ────────────────────────────────────────────────────────────────
+// Derive overall bid status from individual glass/metal scope decisions
+function derivedBidStatus(bid: BidProject): BidStatus {
+  const glassAccepted = (bid.assignees?.length ?? 0) > 0 && !bid.glassDeclined;
+  const metalAccepted = (bid.claddingAssignees?.length ?? 0) > 0 && !bid.metalDeclined;
+  if (glassAccepted || metalAccepted) return 'accepted';
+  if (bid.glassDeclined && bid.metalDeclined) return 'declined';
+  if (bid.status === 'review') return 'review';
+  return 'pending';
+}
+
 const BID_STATUS_COLOR: Record<BidStatus, string> = {
   pending: 'var(--color-text)',
   accepted: '#1f7a4d',
@@ -328,6 +338,11 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
   const [editBid, setEditBid] = useState<BidProject | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [assignees, setAssignees] = useState<string[]>([]);
+  const [claddingAssignees, setCladdingAssignees] = useState<string[]>([]);
+  const [claddingSize, setCladdingSize] = useState<'large' | 'medium' | 'small'>('medium');
+  const [declineForMetal, setDeclineForMetal] = useState<string | null>(null);
+  const [declineReasonMetal, setDeclineReasonMetal] = useState(DECLINE_REASONS[0]);
+  const [declineNoteMetal, setDeclineNoteMetal] = useState('');
   const [notify, setNotify] = useState(true);
   const [declineReason, setDeclineReason] = useState(DECLINE_REASONS[0]);
   const [declineNote, setDeclineNote] = useState('');
@@ -376,15 +391,86 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
     setSt(s => ({ ...s, bidProjects: s.bidProjects.map(b => b.id === id ? { ...b, ...patch } : b) }));
   }
 
+  const [assignMode, setAssignMode] = useState<'full' | 'cladding-only'>('full');
+
   function openAssign(bidId: string) {
     const bid = bids.find(b => b.id === bidId);
     setAssignees(bid?.assignees || []);
+    setCladdingAssignees(bid?.claddingAssignees || []);
+    setCladdingSize(bid?.claddingJobSize || 'medium');
+    setAssignMode('full');
+    setAssignFor(bidId);
+  }
+
+  function openCladdingAssign(bidId: string) {
+    const bid = bids.find(b => b.id === bidId);
+    setCladdingAssignees(bid?.claddingAssignees || []);
+    setCladdingSize(bid?.claddingJobSize || 'medium');
+    setAssignMode('cladding-only');
     setAssignFor(bidId);
   }
 
   function confirmAccept() {
     const bid = bids.find(b => b.id === assignFor);
-    if (!bid || !assignees.length) { flash('Select at least one team member'); return; }
+    if (!bid) return;
+    // Cladding-only mode: just save the cladding assignment + generate cladding tasks
+    if (assignMode === 'cladding-only') {
+      if (!claddingAssignees.length) { flash('Select a metal panel estimator'); return; }
+      const projId = 'bid_' + bid.id;
+      const existingProj = PROJECTS.find(p => p.id === projId);
+      if (!existingProj) {
+        const short = bid.name.length > 22 ? bid.name.slice(0, 20) + '…' : bid.name;
+        PROJECTS.push({ id: projId, ref: 'BID ' + (2050 + Math.floor(Math.random() * 50)), name: bid.name, short, client: bid.gc, gc: bid.gc, scope: bid.scope, bidDue: bid.bidDate, value: '—', bidTab: '—', location: bid.location, glazier: '', sqft: '—', trade: 'acm', drawings: bid.level });
+      }
+      const t0 = today0();
+      const clPrimary = claddingAssignees[0];
+      const cs = claddingSize;
+      const DAY_CAP = 8;
+      const clNewTasks: Task[] = [];
+      const clDayUsed: Record<string, number> = {};
+      for (const t of st.tasks.filter(t => t.who === clPrimary)) {
+        if (t.date) clDayUsed[t.date] = (clDayUsed[t.date] || 0) + (t.hrs || 0);
+      }
+      function clHU(d: Date) { return clDayUsed[ymd(d)] || 0; }
+      function clRH(d: Date, h: number) { const k = ymd(d); clDayUsed[k] = (clDayUsed[k] || 0) + h; }
+      function nWd2(d: Date): Date { const nd = addDays(d, 1); const dy = nd.getDay(); return dy === 0 ? addDays(nd, 1) : dy === 6 ? addDays(nd, 2) : nd; }
+      function nthWd2(start: Date, n: number): Date { let d = new Date(start); for (let i = 0; i < n; i++) d = nWd2(d); return d; }
+      const CLADDING_TASKS2: Array<[string, number, string]> = [
+        ['Project Acceptance & Customer Engagement — Metal Panel', 0.5, 'a. Intro emails\nb. RFIs'],
+        ['Download & Review Project Documents — Metal Panel', cs === 'large' ? 3 : cs === 'medium' ? 2 : 1, 'a. Initial review of drawings to confirm scope\nb. Review all specifications\nc. Review Project Manual\nd. Review Addenda\ne. Review Project Schedule\nf. Review Bid Forms\ng. Create Project Folder'],
+        ['Vendor Distribution — Metal Panel', 0.5, 'a. Send RFQs for applicable Division 7 & Division 8 scope'],
+        ['Plan Set Review & Takeoff — Metal Panel', cs === 'large' ? 16 : cs === 'medium' ? 8 : 4, 'A. Design Criteria: General Notes, Building Code, Design Loads, Wind Pressures, Performance Requirements, Fire Ratings\nB. Architectural Drawing Takeoff: Floor Plans, Elevations, Exterior Details\nC. Quantities: ACM, PSS, IMP, Louvers, Louvered Roof Screens, Extruded Aluminum Planks/Battens, FC, HPL, Metal Specialties, Flashings\nD. Review Structural, Waterproofing, Interior Details\nE. Identify Drawing Conflicts\nF. Missing Information: RFIs to GC'],
+        ['Build Costing Sheet — Metal Panel', cs === 'large' ? 6 : cs === 'medium' ? 4 : 2, 'A. Piece cut lists, material pricing, labor hours, equipment, subcontractor costs\nB. Bond Calculator\nC. Job Recap: labor, vendor totals, material costs, production rates\nD. Equipment: Boom lifts, Scissor lifts, Cranes\nE. Swing Stage: Rental, Mobilization, Installation, Removal, Safety\nF. Vendor Quote Management\nG. Material Lead Times'],
+        ['Write Proposal — Metal Panel', cs === 'large' ? 2 : cs === 'medium' ? 1 : 0.5, 'a. Proposal ID, Bid Date, Project Name & Location\nb. Documents, Scope & Materials, Pricing\nc. Qualifications, Inclusions & Exclusions, Durations\nd. 1CG Warranty & Disclaimer\ne. GC Correspondence — PDF, email summary, Presentation Packet'],
+        ['Create Presentation Packet — Metal Panel', cs === 'large' ? 1 : 0.5, 'a. Cover Page, Preliminary Schedule\nb. Highlighted Floor Plans, Elevations, Details\nc. Finish Chart, Product Data\nd. 1CG Fabrication Capabilities, Office Locations, Portfolio Pictures'],
+        ['Submit Proposal to Customer — Metal Panel', 0.5, 'a. Final customer submission\nb. Required Bid Forms'],
+        ['Customer Follow-Up — Metal Panel', 1, 'a. Follow-up emails\nb. Negotiating the sale\nc. Comeback items\nd. Customer-requested revisions'],
+      ];
+      let clDay = nthWd2(t0, 1);
+      for (const [title, totalHrs, detail] of CLADDING_TASKS2) {
+        let remaining = totalHrs;
+        let d = new Date(clDay);
+        while (remaining > 0) {
+          const avail = DAY_CAP - clHU(d);
+          if (avail <= 0) { d = nWd2(d); continue; }
+          const chunk = Math.min(remaining, avail);
+          const wd = d.getDay() === 0 ? addDays(d, 1) : d.getDay() === 6 ? addDays(d, 2) : d;
+          const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][wd.getDay()];
+          clNewTasks.push({ id: 'mp' + Date.now() + Math.random().toString(36).slice(2), title, projectId: projId, who: clPrimary, status: 'To-Do', due: prettyShort(wd), day: dayName, date: ymd(wd), hrs: chunk, detail, notes: [] });
+          clRH(d, chunk); remaining -= chunk;
+          if (remaining > 0) d = nWd2(d);
+        }
+        clDay = nWd2(clDay);
+      }
+      const metalPatch = { claddingAssignees, claddingJobSize: claddingSize, metalDeclined: false };
+      const withMetal = { ...bid, ...metalPatch };
+      patchBid(bid.id, { ...metalPatch, status: derivedBidStatus(withMetal) });
+      setSt(s => ({ ...s, tasks: [...s.tasks, ...clNewTasks] }));
+      setAssignFor(null);
+      flash('Metal panel scope assigned — tasks added to schedule');
+      return;
+    }
+    if (!assignees.length) { flash('Select at least one team member'); return; }
 
     // create Project
     const projId = 'bid_' + bid.id;
@@ -488,11 +574,69 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
     scheduleTask('Creating the Presentation Packet', dayBid, size === 'large' ? 1 : 0.5, 'a. Cover page\nb. Preliminary installation schedule\nc. Highlighted floor plans, elevations, and details\nd. Finish chart\ne. Product Data: Glass Type info, Every System Type\nf. Proposal Drawings\ng. 1CG Fabrications Capabilities\nh. 1CG Office locations\ni. 1CG Portfolio Pictures');
     scheduleTask('Submission of Proposal to Customer', dayBid, 0.5, 'a. Bid Forms');
 
+    // ── Cladding tasks (completely separate from glass tasks) ──────────────
+    const isCladding = bid.workType === 'ACM / Cladding' || bid.workType === 'Mixed Scope';
+    if (isCladding && claddingAssignees.length > 0) {
+      const clPrimary = claddingAssignees[0];
+      const cs = claddingSize;
+      const CLADDING_TASKS: Array<[string, number, string]> = [
+        ['Project Acceptance & Customer Engagement — Cladding', 0.5,
+          'a. Intro emails\nb. RFIs'],
+        ['Download & Review Project Documents — Cladding', cs === 'large' ? 3 : cs === 'medium' ? 2 : 1,
+          'a. Initial review of drawings to confirm scope\nb. Review all specifications\nc. Review Project Manual\nd. Review Addenda\ne. Review Project Schedule\nf. Review Bid Forms\ng. Create Project Folder'],
+        ['Vendor Distribution — Cladding', 0.5,
+          'a. Send RFQs for applicable Division 7 & Division 8 scope'],
+        ['Plan Set Review & Takeoff — Cladding', cs === 'large' ? 16 : cs === 'medium' ? 8 : 4,
+          'A. Design Criteria: General Notes, Building Code, Design Loads, Wind Pressures, Performance Requirements, Fire Ratings, Accessibility Requirements\nB. Architectural Drawing Takeoff: Overall Floor Plans, Enlarged Floor Plans, Overall Elevations, Enlarged Elevations, Reflected Ceiling Plans, Roof Plans, Exterior Details\nC. Quantities: ACM, PSS, IMP, Louvers, Louvered Roof Screens, Extruded Aluminum Planks, Extruded Aluminum Battens, FC, HPL, Metal Specialties, Flashings\nD. Review Other Drawing Disciplines: Structural, Waterproofing, Interior Details\nE. Identify Drawing Conflicts\nF. Missing Information: Request clarification from GC / Submit RFI'],
+        ['Build Costing Sheet — Cladding', cs === 'large' ? 6 : cs === 'medium' ? 4 : 2,
+          'A. Costing Sheet: Piece cut lists, material pricing, labor hours, equipment, subcontractor costs, taxes, markups, final selling price\nB. Bond Calculator\nC. Job Recap: Labor, vendor totals, material costs, production rates\nD. Equipment: Boom lifts, Scissor lifts, Forklifts, Cranes, Specialized equipment\nE. Swing Stage: Rental, Mobilization, Installation, Removal, Safety\nF. Vendor Quote Management: Spec compliance, sq-ft comparisons, multi-vendor pricing\nG. Material Lead Times: Identify risks, support BD, coordinate procurement'],
+        ['Write Proposal — Cladding', cs === 'large' ? 2 : cs === 'medium' ? 1 : 0.5,
+          'a. Proposal ID\nb. Bid Date\nc. Project Name & Location\nd. Documents Provided\ne. Scope & Materials\nf. Pricing\ng. Qualifications, Inclusions & Exclusions\nh. Durations / Lead Times\ni. 1CG Warranty & Disclaimer\nj. Correspondence to GC — PDF Proposal, key info in email body, Presentation Packet'],
+        ['Create Presentation Packet — Cladding', cs === 'large' ? 1 : 0.5,
+          'a. Cover Page\nb. Preliminary Installation Schedule\nc. Highlighted Floor Plans, Elevations, Details\nd. Finish Chart\ne. Product Data for every system type\nf. Proposal Drawings\ng. 1CG Fabrication Capabilities\nh. 1CG Office Locations\ni. 1CG Portfolio Pictures'],
+        ['Submit Proposal to Customer — Cladding', 0.5,
+          'a. Final customer submission\nb. Required Bid Forms'],
+        ['Customer Follow-Up — Cladding', 1,
+          'a. Customer follow-up emails\nb. Negotiating the sale\nc. Comeback items\nd. Customer-requested revisions'],
+      ];
+
+      // Track cladding estimator capacity separately
+      const clDayUsed: Record<string, number> = {};
+      for (const t of st.tasks.filter(t => t.who === clPrimary)) {
+        if (t.date) clDayUsed[t.date] = (clDayUsed[t.date] || 0) + (t.hrs || 0);
+      }
+      function clHoursUsed(d: Date): number { return clDayUsed[ymd(d)] || 0; }
+      function clReserveHours(d: Date, hrs: number) { const k = ymd(d); clDayUsed[k] = (clDayUsed[k] || 0) + hrs; }
+
+      let clDay = nthWorkday(t0, 1);
+      for (const [title, totalHrs, detail] of CLADDING_TASKS) {
+        let remaining = totalHrs;
+        let d = new Date(clDay);
+        while (remaining > 0) {
+          const available = DAY_CAP - clHoursUsed(d);
+          if (available <= 0) { d = nextWd(d); continue; }
+          const chunk = Math.min(remaining, available);
+          const wd = d.getDay() === 0 ? addDays(d, 1) : d.getDay() === 6 ? addDays(d, 2) : d;
+          const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][wd.getDay()];
+          newTasks.push({ id: 'cl' + Date.now() + Math.random().toString(36).slice(2), title, projectId: projId, who: clPrimary, status: 'To-Do', due: prettyShort(wd), day: dayName, date: ymd(wd), hrs: chunk, detail, notes: [] });
+          clReserveHours(d, chunk);
+          remaining -= chunk;
+          if (remaining > 0) d = nextWd(d);
+        }
+        clDay = nextWd(clDay);
+      }
+    }
+
     // create Deal
     const today = new Date().toLocaleDateString([], { month: 'short', day: '2-digit' });
     const newDeal: Deal = { estimator: primary, manager: '', bd: '', stage: 'Bidding', docStage: bid.level, price: '', cost: '', loggedAt: today, assignedAt: today };
 
-    patchBid(bid.id, { status: 'accepted', assignees, notified: notify, assignedDate: today });
+    const claddingPatch = (bids.find(b => b.id === assignFor)?.workType === 'ACM / Cladding' || bids.find(b => b.id === assignFor)?.workType === 'Mixed Scope') && claddingAssignees.length > 0
+      ? { claddingAssignees, claddingJobSize: claddingSize }
+      : {};
+    const glassPatch = { assignees, notified: notify, assignedDate: today, glassDeclined: false, ...claddingPatch };
+    const withGlass = { ...bid, ...glassPatch };
+    patchBid(bid.id, { ...glassPatch, status: derivedBidStatus(withGlass) });
     setSt(s => ({ ...s, tasks: [...s.tasks, ...newTasks], deals: { ...s.deals, [projId]: newDeal } }));
     setAssignFor(null);
     flash('Accepted — project added to Task Tracker + CRM');
@@ -500,9 +644,13 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
 
   function confirmDecline() {
     if (!declineFor) return;
-    patchBid(declineFor, { status: 'declined', declineReason, declineNote });
+    const bid = bids.find(b => b.id === declineFor);
+    if (!bid) return;
+    const glassPatch = { declineReason, declineNote, glassDeclined: true, assignees: [] as string[] };
+    const withGlass = { ...bid, ...glassPatch };
+    patchBid(declineFor, { ...glassPatch, status: derivedBidStatus(withGlass) });
     setDeclineFor(null); setDeclineNote('');
-    flash('Bid declined');
+    flash('Glass scope declined');
   }
 
   function saveDraft() {
@@ -885,23 +1033,49 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
                       )}
 
                       {/* actions */}
-                      <div onClick={e => e.stopPropagation()} style={{ display: 'flex', gap: 8, marginTop: 'auto', paddingTop: 10, borderTop: '1px solid var(--color-divider)', flexWrap: 'wrap' }}>
-                        {(bid.status === 'pending' || bid.status === 'review') && <>
-                          <button onClick={() => openAssign(bid.id)} style={{ flex: 1, padding: '9px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>ACCEPT</button>
-                          <button onClick={() => { setDeclineFor(bid.id); setDeclineReason(DECLINE_REASONS[0]); setDeclineNote(''); }} style={{ flex: 1, padding: '9px', background: 'none', color: 'var(--color-text)', border: '1px solid var(--color-text)', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>DECLINE</button>
-                          {bid.status === 'pending' && <button onClick={() => { setReviewFor(bid.id); setReviewReason(REVIEW_REASONS[0]); setReviewNote(''); }} style={{ padding: '7px 8px', background: 'none', border: '1px solid oklch(0.50 0.18 240)', font: '600 9px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'oklch(0.50 0.18 240)' }}>IN REVIEW</button>}
-                          {bid.status === 'review' && <button onClick={() => patchBid(bid.id, { status: 'pending', reviewReason: '' })} style={{ padding: '7px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 9px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>UNMARK</button>}
-                        </>}
-                        {bid.status === 'accepted' && (
-                          <button onClick={() => openAssign(bid.id)} style={{ padding: '7px 12px', background: 'none', border: '1px solid var(--color-text)', font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>REASSIGN</button>
-                        )}
-                        {!bid.archived && (
-                          <button onClick={() => { const todayStr = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); patchBid(bid.id, { archived: true, archivedAt: todayStr }); flash('Bid archived'); }} style={{ padding: '7px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 9px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>ARCHIVE</button>
-                        )}
-                        {bid.archived && (
-                          <button onClick={() => patchBid(bid.id, { archived: false, archivedAt: undefined })} style={{ padding: '7px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 9px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>RESTORE</button>
-                        )}
-                      </div>
+                      {(() => {
+                        const glassAcc = (bid.assignees?.length ?? 0) > 0 && !bid.glassDeclined;
+                        const glassDec = !!bid.glassDeclined;
+                        const metalAcc = (bid.claddingAssignees?.length ?? 0) > 0 && !bid.metalDeclined;
+                        const metalDec = !!bid.metalDeclined;
+                        return (
+                        <div onClick={e => e.stopPropagation()} style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 'auto', paddingTop: 10, borderTop: '1px solid var(--color-divider)' }}>
+                          {/* GLASS row */}
+                          <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+                            <span style={{ font: '700 8px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-500)', width: 38, flexShrink: 0 }}>GLASS</span>
+                            {glassAcc
+                              ? <><span style={{ font: '600 9px/1 var(--font-body)', color: '#1f7a4d', letterSpacing: '.07em' }}>ACCEPTED ✓</span><button onClick={() => openAssign(bid.id)} style={{ marginLeft: 6, padding: '5px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 8px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>REASSIGN</button></>
+                              : glassDec
+                              ? <><span style={{ font: '600 9px/1 var(--font-body)', color: 'var(--color-accent)', letterSpacing: '.07em' }}>DECLINED</span><button onClick={() => { patchBid(bid.id, { glassDeclined: false, status: derivedBidStatus({ ...bid, glassDeclined: false }) }); }} style={{ marginLeft: 6, padding: '5px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 8px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>UNDO</button></>
+                              : <>
+                                  <button onClick={() => openAssign(bid.id)} style={{ flex: 1, padding: '7px 4px', background: 'var(--color-accent)', color: '#fff', border: 'none', font: '700 10px/1 var(--font-body)', letterSpacing: '.07em', cursor: 'pointer' }}>ACCEPT</button>
+                                  <button onClick={() => { setDeclineFor(bid.id); setDeclineReason(DECLINE_REASONS[0]); setDeclineNote(''); }} style={{ flex: 1, padding: '7px 4px', background: 'none', color: 'var(--color-text)', border: '1px solid var(--color-text)', font: '700 10px/1 var(--font-body)', letterSpacing: '.07em', cursor: 'pointer' }}>DECLINE</button>
+                                </>
+                            }
+                          </div>
+                          {/* METAL PANEL row */}
+                          <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+                            <span style={{ font: '700 8px/1 var(--font-body)', letterSpacing: '.1em', color: 'oklch(0.45 0.14 200)', width: 38, flexShrink: 0 }}>METAL</span>
+                            {metalAcc
+                              ? <><span style={{ font: '600 9px/1 var(--font-body)', color: 'oklch(0.45 0.14 200)', letterSpacing: '.07em' }}>ACCEPTED ✓</span><button onClick={() => openCladdingAssign(bid.id)} style={{ marginLeft: 6, padding: '5px 8px', background: 'none', border: '1px solid oklch(0.45 0.14 200)', font: '600 8px/1 var(--font-body)', cursor: 'pointer', color: 'oklch(0.45 0.14 200)' }}>REASSIGN</button></>
+                              : metalDec
+                              ? <><span style={{ font: '600 9px/1 var(--font-body)', color: 'oklch(0.45 0.14 200)', letterSpacing: '.07em', opacity: .7 }}>DECLINED</span><button onClick={() => { patchBid(bid.id, { metalDeclined: false, status: derivedBidStatus({ ...bid, metalDeclined: false }) }); }} style={{ marginLeft: 6, padding: '5px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 8px/1 var(--font-body)', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>UNDO</button></>
+                              : <>
+                                  <button onClick={() => openCladdingAssign(bid.id)} style={{ flex: 1, padding: '7px 4px', background: 'oklch(0.45 0.14 200)', color: '#fff', border: 'none', font: '700 10px/1 var(--font-body)', letterSpacing: '.07em', cursor: 'pointer' }}>ACCEPT</button>
+                                  <button onClick={() => { setDeclineForMetal(bid.id); setDeclineReasonMetal(DECLINE_REASONS[0]); setDeclineNoteMetal(''); }} style={{ flex: 1, padding: '7px 4px', background: 'none', color: 'oklch(0.45 0.14 200)', border: '1px solid oklch(0.45 0.14 200)', font: '700 10px/1 var(--font-body)', letterSpacing: '.07em', cursor: 'pointer' }}>DECLINE</button>
+                                </>
+                            }
+                          </div>
+                          {/* REVIEW + ARCHIVE row */}
+                          <div style={{ display: 'flex', gap: 5, justifyContent: 'flex-end', paddingTop: 4, borderTop: '1px solid var(--color-divider)', marginTop: 2 }}>
+                            {bid.status === 'pending' && <button onClick={() => { setReviewFor(bid.id); setReviewReason(REVIEW_REASONS[0]); setReviewNote(''); }} style={{ padding: '5px 8px', background: 'none', border: '1px solid oklch(0.50 0.18 240)', font: '600 8px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'oklch(0.50 0.18 240)' }}>IN REVIEW</button>}
+                            {bid.status === 'review' && <button onClick={() => patchBid(bid.id, { status: 'pending', reviewReason: '' })} style={{ padding: '5px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 8px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>UNMARK REVIEW</button>}
+                            {!bid.archived && <button onClick={() => { const todayStr = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); patchBid(bid.id, { archived: true, archivedAt: todayStr }); flash('Bid archived'); }} style={{ padding: '5px 8px', background: 'none', border: '1px solid var(--color-neutral-300)', font: '600 8px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'var(--color-neutral-500)' }}>ARCHIVE</button>}
+                            {bid.archived && <button onClick={() => patchBid(bid.id, { archived: false, archivedAt: undefined })} style={{ padding: '5px 8px', background: 'none', border: '1px solid var(--color-neutral-400)', font: '600 8px/1 var(--font-body)', letterSpacing: '.06em', cursor: 'pointer', color: 'var(--color-neutral-600)' }}>RESTORE</button>}
+                          </div>
+                        </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 );
@@ -1104,39 +1278,106 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
       })()}
 
       {/* ── ASSIGN MODAL ── */}
-      {assignFor && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.5)', display: 'grid', placeItems: 'center', zIndex: 90 }}>
-          <div style={{ background: 'var(--color-bg)', border: '2px solid var(--color-text)', width: 500, maxWidth: '92vw', maxHeight: '88vh', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ padding: '16px 20px', borderBottom: '2px solid var(--color-text)', font: '800 16px/1 var(--font-heading)' }}>ASSIGN ESTIMATOR{assignees.length > 1 ? 'S' : ''}</div>
-            <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {PEOPLE.filter(p => p.kind === 'estimator' || p.kind === 'manager').map(p => {
-                const load = st.tasks.filter(t => t.who === p.id && t.status !== 'Complete').length;
-                const on = assignees.includes(p.id);
-                return (
-                  <button key={p.id} onClick={() => setAssignees(prev => on ? prev.filter(x => x !== p.id) : [...prev, p.id])} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px', border: '2px solid ' + (on ? 'var(--color-text)' : 'var(--color-divider)'), background: on ? 'var(--color-text)' : 'transparent', color: on ? '#fff' : 'var(--color-text)', cursor: 'pointer', textAlign: 'left' }}>
-                    <div style={{ width: 30, height: 30, background: on ? 'var(--color-accent)' : 'var(--color-neutral-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 10px/1 var(--font-body)', flexShrink: 0, color: on ? '#fff' : 'var(--color-text)' }}>{p.initials}</div>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ font: '700 13px/1 var(--font-heading)' }}>{p.name}</div>
-                      <div style={{ font: '500 11px/1 var(--font-body)', opacity: .7, marginTop: 3 }}>{p.role}</div>
+      {assignFor && (() => {
+        const assignBid = bids.find(b => b.id === assignFor);
+        const hasCladding = assignMode === 'cladding-only' || assignBid?.workType === 'ACM / Cladding' || assignBid?.workType === 'Mixed Scope';
+        const isCladdingOnly = assignMode === 'cladding-only';
+        const CLADDING_HOURS: Record<string, number> = { large: 30.5, medium: 18, small: 11 };
+        return (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.5)', display: 'grid', placeItems: 'center', zIndex: 90 }}>
+            <div style={{ background: 'var(--color-bg)', border: '2px solid ' + (isCladdingOnly ? 'oklch(0.45 0.14 200)' : 'var(--color-text)'), width: hasCladding ? 580 : 500, maxWidth: '96vw', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ padding: '16px 20px', borderBottom: '2px solid ' + (isCladdingOnly ? 'oklch(0.45 0.14 200)' : 'var(--color-text)'), background: isCladdingOnly ? 'oklch(0.45 0.14 200)' : 'transparent', font: '800 16px/1 var(--font-heading)', color: isCladdingOnly ? '#fff' : 'var(--color-text)', display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span>{isCladdingOnly ? 'ASSIGN METAL PANEL ESTIMATOR' : ('ASSIGN ESTIMATOR' + (assignees.length > 1 ? 'S' : ''))}</span>
+                {isCladdingOnly && <span style={{ font: '500 11px/1 var(--font-body)', opacity: .8 }}>— independent from glass scope</span>}
+              </div>
+              <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+                {/* ── GLASS SCOPE (hidden in cladding-only mode) ── */}
+                {!isCladdingOnly && <div>
+                  <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'var(--color-neutral-600)', marginBottom: 10, paddingBottom: 6, borderBottom: '1px solid var(--color-divider)' }}>
+                    GLASS SCOPE — ESTIMATOR
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {PEOPLE.filter(p => p.kind === 'estimator' || p.kind === 'manager').map(p => {
+                      const load = st.tasks.filter(t => t.who === p.id && t.status !== 'Complete').length;
+                      const on = assignees.includes(p.id);
+                      return (
+                        <button key={p.id} onClick={() => setAssignees(prev => on ? prev.filter(x => x !== p.id) : [...prev, p.id])} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', border: '2px solid ' + (on ? 'var(--color-text)' : 'var(--color-divider)'), background: on ? 'var(--color-text)' : 'transparent', color: on ? '#fff' : 'var(--color-text)', cursor: 'pointer', textAlign: 'left' }}>
+                          <div style={{ width: 28, height: 28, background: on ? 'var(--color-accent)' : 'var(--color-neutral-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 10px/1 var(--font-body)', flexShrink: 0, color: on ? '#fff' : 'var(--color-text)' }}>{p.initials}</div>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ font: '700 12px/1 var(--font-heading)' }}>{p.name}</div>
+                            <div style={{ font: '500 10px/1 var(--font-body)', opacity: .7, marginTop: 2 }}>{p.role}</div>
+                          </div>
+                          <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', opacity: .7 }}>{load} OPEN</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>}
+
+                {/* ── CLADDING / METAL PANEL SCOPE ── */}
+                {hasCladding && (
+                  <div style={{ borderTop: isCladdingOnly ? 'none' : '2px solid var(--color-divider)', paddingTop: isCladdingOnly ? 0 : 16 }}>
+                    {!isCladdingOnly && <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, paddingBottom: 6, borderBottom: '1px solid var(--color-divider)' }}>
+                      <div style={{ font: '700 10px/1 var(--font-body)', letterSpacing: '.14em', color: 'oklch(0.45 0.14 200)' }}>METAL PANEL / CLADDING SCOPE</div>
+                      <div style={{ font: '500 10px/1 var(--font-body)', color: 'var(--color-neutral-500)' }}>Independent from glass tasks</div>
+                    </div>}
+
+                    {/* Metal panel / cladding size selector */}
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.1em', color: 'var(--color-neutral-600)', marginBottom: 6 }}>METAL PANEL PROJECT SIZE</div>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        {(['large', 'medium', 'small'] as const).map(sz => {
+                          const hrs = CLADDING_HOURS[sz];
+                          const active = claddingSize === sz;
+                          return (
+                            <button key={sz} onClick={() => setCladdingSize(sz)} style={{ flex: 1, padding: '10px 8px', border: '2px solid ' + (active ? 'oklch(0.45 0.14 200)' : 'var(--color-divider)'), background: active ? 'oklch(0.45 0.14 200)' : 'transparent', color: active ? '#fff' : 'var(--color-text)', cursor: 'pointer', textAlign: 'center' }}>
+                              <div style={{ font: '700 11px/1 var(--font-body)', letterSpacing: '.08em' }}>{sz.toUpperCase()}</div>
+                              <div style={{ font: '500 10px/1 var(--font-body)', opacity: .8, marginTop: 3 }}>{hrs} hrs total</div>
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
-                    <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', opacity: .7 }}>{load} OPEN TASKS</div>
-                  </button>
-                );
-              })}
-            </div>
-            <div style={{ padding: '14px 20px', borderTop: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', font: '600 12px/1 var(--font-body)' }}>
-                <input type="checkbox" checked={notify} onChange={e => setNotify(e.target.checked)} />
-                Notify assignees by email
-              </label>
-              <div style={{ display: 'flex', gap: 10 }}>
-                <Button onClick={confirmAccept}>CONFIRM ACCEPT</Button>
-                <Button variant="secondary" onClick={() => setAssignFor(null)}>CANCEL</Button>
+
+                    {/* Cladding estimator */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {PEOPLE.filter(p => p.kind === 'estimator' || p.kind === 'manager').map(p => {
+                        const load = st.tasks.filter(t => t.who === p.id && t.status !== 'Complete').length;
+                        const on = claddingAssignees.includes(p.id);
+                        return (
+                          <button key={p.id} onClick={() => setCladdingAssignees(prev => on ? prev.filter(x => x !== p.id) : [...prev, p.id])} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', border: '2px solid ' + (on ? 'oklch(0.45 0.14 200)' : 'var(--color-divider)'), background: on ? 'oklch(0.45 0.14 200)' : 'transparent', color: on ? '#fff' : 'var(--color-text)', cursor: 'pointer', textAlign: 'left' }}>
+                            <div style={{ width: 28, height: 28, background: on ? 'rgba(255,255,255,.25)' : 'var(--color-neutral-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', font: '700 10px/1 var(--font-body)', flexShrink: 0, color: on ? '#fff' : 'var(--color-text)' }}>{p.initials}</div>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ font: '700 12px/1 var(--font-heading)' }}>{p.name}</div>
+                              <div style={{ font: '500 10px/1 var(--font-body)', opacity: .7, marginTop: 2 }}>{p.role}</div>
+                            </div>
+                            <div style={{ font: '600 10px/1 var(--font-body)', letterSpacing: '.08em', opacity: .7 }}>{load} OPEN</div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {claddingAssignees.length === 0 && (
+                      <div style={{ font: '400 11px/1.4 var(--font-body)', color: 'var(--color-neutral-500)', marginTop: 8, fontStyle: 'italic' }}>No cladding estimator selected — cladding tasks will not be generated.</div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ padding: '14px 20px', borderTop: '1px solid var(--color-divider)', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', font: '600 12px/1 var(--font-body)' }}>
+                  <input type="checkbox" checked={notify} onChange={e => setNotify(e.target.checked)} />
+                  Notify assignees by email
+                </label>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <Button onClick={confirmAccept}>{isCladdingOnly ? 'ASSIGN METAL PANEL' : 'CONFIRM ACCEPT'}</Button>
+                  <Button variant="secondary" onClick={() => setAssignFor(null)}>CANCEL</Button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ── DECLINE MODAL ── */}
       {declineFor && (
@@ -1155,6 +1396,29 @@ function BidBoardView({ st, setSt, me, flash, onSignOut }: {
               <div style={{ display: 'flex', gap: 10 }}>
                 <Button onClick={confirmDecline}>CONFIRM DECLINE</Button>
                 <Button variant="secondary" onClick={() => setDeclineFor(null)}>CANCEL</Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── METAL PANEL DECLINE MODAL ── */}
+      {declineForMetal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(32,30,29,.5)', display: 'grid', placeItems: 'center', zIndex: 90 }}>
+          <div style={{ background: 'var(--color-bg)', border: '2px solid oklch(0.45 0.14 200)', width: 460, maxWidth: '92vw' }}>
+            <div style={{ padding: '16px 20px', borderBottom: '2px solid oklch(0.45 0.14 200)', font: '800 16px/1 var(--font-heading)', color: 'oklch(0.45 0.14 200)' }}>DECLINE METAL PANEL SCOPE</div>
+            <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <Field label="REASON">
+                <select value={declineReasonMetal} onChange={e => setDeclineReasonMetal(e.target.value)} style={{ ...inp, appearance: 'none' }}>
+                  {DECLINE_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+                </select>
+              </Field>
+              <Field label="NOTE (OPTIONAL)">
+                <textarea value={declineNoteMetal} onChange={e => setDeclineNoteMetal(e.target.value)} placeholder="Additional context for the record…" style={{ ...inp, minHeight: 72, resize: 'vertical' }} />
+              </Field>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button onClick={() => { const b = bids.find(x => x.id === declineForMetal); if (!b) return; const mp = { claddingAssignees: [] as string[], claddingJobSize: undefined, metalDeclined: true }; patchBid(b.id, { ...mp, status: derivedBidStatus({ ...b, ...mp }) }); setDeclineForMetal(null); setDeclineNoteMetal(''); flash('Metal panel scope declined'); }} style={{ padding: '10px 18px', background: 'oklch(0.45 0.14 200)', color: '#fff', border: 'none', font: '700 11px/1 var(--font-body)', letterSpacing: '.08em', cursor: 'pointer' }}>CONFIRM DECLINE</button>
+                <Button variant="secondary" onClick={() => setDeclineForMetal(null)}>CANCEL</Button>
               </div>
             </div>
           </div>

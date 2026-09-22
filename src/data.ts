@@ -33,7 +33,11 @@ export interface BidProject {
   notified: boolean; photo?: string;
   archived?: boolean; archivedAt?: string;
   entryDate?: string; assignedDate?: string;
-  jobSize?: 'large' | 'medium' | 'small';
+  jobSize?: 'large' | 'medium' | 'small'; // glass scope size
+  claddingAssignees?: string[]; // separate cladding estimator(s)
+  claddingJobSize?: 'large' | 'medium' | 'small'; // cladding scope size (independent)
+  glassDeclined?: boolean; // glass scope explicitly declined
+  metalDeclined?: boolean; // metal panel scope explicitly declined
   // new structured fields
   typeBid?: BidTypeBid;
   workType?: BidWorkType;
